@@ -3,49 +3,131 @@
 
 <head>
   <%- header %>
+  <style>
+    /* ── Pre-auth Shell & Modern Welcome Card ── */
+    .preauth-welcome-layout {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 2.5rem 1rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .preauth-topbar {
+      position: absolute;
+      top: 1rem;
+      right: 1.5rem;
+      z-index: 10;
+    }
+
+    .ares-card {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 14px;
+      background: var(--bs-body-bg);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    }
+
+    .preauth-header {
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--bs-border-color);
+      margin-bottom: 1.25rem;
+    }
+
+    .preauth-logo {
+      height: 48px;
+      margin-bottom: 0.75rem;
+    }
+
+    .preauth-title {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+
+    .config-field-label {
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin-bottom: 0.25rem;
+    }
+  </style>
 </head>
 
 <body id="app" v-cloak>
-  <main role="main" style="max-width: 1200px; margin: 1em auto">
-    <div class="d-flex gap-4">
-      <div class="card p-2">
-        <header>
-          <h1 class="mb-0">
-            <img src="./images/logo-apollo-45.png" height="45" alt="">
-            {{ $t('welcome.greeting') }}
-          </h1>
-        </header>
-        <p class="my-2 align-self-start">{{ $t('welcome.create_creds') }}</p>
-        <div class="alert alert-warning">
-          {{ $t('welcome.create_creds_alert') }}
+  <div class="preauth-topbar">
+    <ThemeToggle />
+  </div>
+
+  <main role="main" class="preauth-welcome-layout">
+    <div class="row g-4 align-items-start">
+      <!-- Welcome credentials card -->
+      <div class="col-12 col-lg-6">
+        <div class="card ares-card p-4">
+          <header class="preauth-header">
+            <img src="./images/logo-apollo-45.png" class="preauth-logo" alt="Ares logo">
+            <h1 class="preauth-title mb-0">
+              {{ $t('welcome.greeting') }}
+            </h1>
+          </header>
+
+          <p class="text-muted mb-3">{{ $t('welcome.create_creds') }}</p>
+
+          <div class="alert alert-warning d-flex align-items-center mb-4">
+            <i class="fas fa-shield-alt fa-lg me-3 text-warning" aria-hidden="true"></i>
+            <div>{{ $t('welcome.create_creds_alert') }}</div>
+          </div>
+
+          <form @submit.prevent="save">
+            <div class="mb-3">
+              <label for="usernameInput" class="form-label config-field-label">{{ $t('_common.username') }}</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="fas fa-user" aria-hidden="true"></i></span>
+                <input type="text" class="form-control" id="usernameInput" autocomplete="username"
+                  v-model="passwordData.newUsername" />
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label for="passwordInput" class="form-label config-field-label">{{ $t('_common.password') }}</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="fas fa-lock" aria-hidden="true"></i></span>
+                <input type="password" class="form-control" id="passwordInput" autocomplete="new-password"
+                  v-model="passwordData.newPassword" required />
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <label for="confirmPasswordInput" class="form-label config-field-label">{{ $t('welcome.confirm_password') }}</label>
+              <div class="input-group">
+                <span class="input-group-text"><i class="fas fa-check-double" aria-hidden="true"></i></span>
+                <input type="password" class="form-control" id="confirmPasswordInput" autocomplete="new-password"
+                  v-model="passwordData.confirmNewPassword" required />
+              </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary w-100 py-2 mb-3" :disabled="loading">
+              <span v-if="loading" class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+              <i v-else class="fas fa-user-plus me-1" aria-hidden="true"></i>
+              {{ $t('welcome.login') }}
+            </button>
+
+            <div class="alert alert-danger d-flex align-items-center mb-0" v-if="error">
+              <i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>
+              <div><b>{{ $t('_common.error') }}</b> {{error}}</div>
+            </div>
+
+            <div class="alert alert-success d-flex align-items-center mb-0" v-if="success">
+              <i class="fas fa-check-circle me-2" aria-hidden="true"></i>
+              <div><b>{{ $t('_common.success') }}</b> {{ $t('welcome.welcome_success') }}</div>
+            </div>
+          </form>
         </div>
-        <form @submit.prevent="save">
-          <div class="mb-2">
-            <label for="usernameInput" class="form-label">{{ $t('_common.username') }}</label>
-            <input type="text" class="form-control" id="usernameInput" autocomplete="username"
-              v-model="passwordData.newUsername" />
-          </div>
-          <div class="mb-2">
-            <label for="passwordInput" class="form-label">{{ $t('_common.password') }}</label>
-            <input type="password" class="form-control" id="passwordInput" autocomplete="new-password"
-              v-model="passwordData.newPassword" required />
-          </div>
-          <div class="mb-2">
-            <label for="confirmPasswordInput" class="form-label">{{ $t('welcome.confirm_password') }}</label>
-            <input type="password" class="form-control" id="confirmPasswordInput" autocomplete="new-password"
-              v-model="passwordData.confirmNewPassword" required />
-          </div>
-          <button type="submit" class="btn btn-primary w-100 mb-2" v-bind:disabled="loading">
-            {{ $t('welcome.login') }}
-          </button>
-          <div class="alert alert-danger" v-if="error"><b>{{ $t('_common.error') }}</b> {{error}}</div>
-          <div class="alert alert-success" v-if="success">
-            <b>{{ $t('_common.success') }}</b> {{ $t('welcome.welcome_success') }}
-          </div>
-        </form>
       </div>
-      <div>
-        <Resource-Card></Resource-Card>
+
+      <!-- Resources & Legal card -->
+      <div class="col-12 col-lg-6">
+        <ResourceCard />
       </div>
     </div>
   </main>
@@ -54,11 +136,13 @@
 <script type="module">
   import { createApp } from "vue"
   import ResourceCard from './ResourceCard.vue'
+  import ThemeToggle from './ThemeToggle.vue'
   import { initApp } from './init'
 
   let app = createApp({
     components: {
-      ResourceCard
+      ResourceCard,
+      ThemeToggle
     },
     data() {
       return {
@@ -102,6 +186,9 @@
           } else {
             this.error = "Internal Server Error";
           }
+        }).catch((err) => {
+          this.loading = false;
+          this.error = String(err);
         });
       },
     },
@@ -109,3 +196,4 @@
 
   initApp(app);
 </script>
+</html>

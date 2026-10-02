@@ -8,7 +8,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const webDir = path.resolve(__dirname, '../../src_assets/common/assets/web');
 
-test('apps.html UI contract and API preservation', () => {
+// NOTE: These tests are static file contract checks only. They verify AST/content
+// structure, required endpoint strings, layout containers, and security boundaries.
+// For behavioral runtime logic, see test_sidebar_behavior.test.mjs.
+
+test('[Static Contract] apps.html UI contract and API preservation', () => {
   const content = fs.readFileSync(path.join(webDir, 'apps.html'), 'utf8');
 
   // Ares navigation & body shell
@@ -78,7 +82,7 @@ test('apps.html UI contract and API preservation', () => {
   assert.ok(content.includes('config-save-bar'), 'Must include sticky save bar');
 });
 
-test('pin.html UI contract and pairing API preservation', () => {
+test('[Static Contract] pin.html UI contract and pairing API preservation', () => {
   const content = fs.readFileSync(path.join(webDir, 'pin.html'), 'utf8');
 
   // Ares navigation & layout
@@ -136,7 +140,7 @@ test('pin.html UI contract and pairing API preservation', () => {
   assert.ok(content.includes('ares-client-item'), 'Must render ares-client-item styling');
 });
 
-test('config.html save body sanitization and dirty baseline behavior', () => {
+test('[Static Contract] config.html save body sanitization and dirty baseline behavior', () => {
   const content = fs.readFileSync(path.join(webDir, 'config.html'), 'utf8');
 
   // Stripping runtime keys before config save
@@ -166,7 +170,86 @@ test('config.html save body sanitization and dirty baseline behavior', () => {
   assert.ok(content.includes('isDirty()'), 'Must maintain isDirty computed property');
 });
 
-test('AresSidebar.vue focus-trap and dropdown safety', () => {
+test('[Static Contract] password.html UI contract and credentials API preservation', () => {
+  const content = fs.readFileSync(path.join(webDir, 'password.html'), 'utf8');
+
+  // Authenticated shell
+  assert.ok(content.includes('<AresSidebar></AresSidebar>'), 'Must include AresSidebar component');
+  assert.ok(content.includes('ares-page-body container'), 'Must use ares-page-body layout');
+
+  // Endpoint and credentials inclusion
+  assert.ok(content.includes('./api/password'), 'Must post to ./api/password');
+  assert.ok(content.includes("credentials: 'include'"), 'Must include credentials in fetch');
+  assert.ok(content.includes('JSON.stringify(this.passwordData)'), 'Must post passwordData');
+
+  // Fields and password validation
+  assert.ok(content.includes('currentUsername'), 'Must contain currentUsername');
+  assert.ok(content.includes('currentPassword'), 'Must contain currentPassword');
+  assert.ok(content.includes('newUsername'), 'Must contain newUsername');
+  assert.ok(content.includes('newPassword'), 'Must contain newPassword');
+  assert.ok(content.includes('confirmNewPassword'), 'Must contain confirmNewPassword');
+  assert.ok(content.includes('Password mismatch'), 'Must validate password confirmation equality');
+});
+
+test('[Static Contract] troubleshooting.html UI contract and destructive confirmation preservation', () => {
+  const content = fs.readFileSync(path.join(webDir, 'troubleshooting.html'), 'utf8');
+
+  // Authenticated shell
+  assert.ok(content.includes('<AresSidebar></AresSidebar>'), 'Must include AresSidebar component');
+  assert.ok(content.includes('ares-page-body container'), 'Must use ares-page-body layout');
+
+  // Endpoints with credentials
+  const requiredEndpoints = [
+    './api/logs',
+    './api/apps/close',
+    './api/restart',
+    './api/quit',
+    '/api/reset-display-device-persistence'
+  ];
+  for (const endpoint of requiredEndpoints) {
+    assert.ok(content.includes(endpoint), `Must preserve endpoint: ${endpoint}`);
+  }
+  assert.ok(content.includes("credentials: 'include'"), 'Must preserve credentials: include across fetches');
+
+  // Destructive action confirmation guard
+  assert.ok(
+    content.includes("window.confirm(this.i18n.t('troubleshooting.quit_apollo_confirm'))"),
+    'Must protect quit action with explicit window.confirm'
+  );
+
+  // Features: copy logs, filtering
+  assert.ok(content.includes('copyLogs'), 'Must have copyLogs method');
+  assert.ok(content.includes('actualLogs'), 'Must have actualLogs computed property with filter');
+});
+
+test('[Static Contract] preauth login.html and welcome.html security isolation', () => {
+  const loginContent = fs.readFileSync(path.join(webDir, 'login.html'), 'utf8');
+  const welcomeContent = fs.readFileSync(path.join(webDir, 'welcome.html'), 'utf8');
+
+  // SECURITY: Must NOT expose AresSidebar on unauthenticated login or welcome pages
+  assert.ok(!loginContent.includes('<AresSidebar'), 'login.html must NOT include AresSidebar');
+  assert.ok(!welcomeContent.includes('<AresSidebar'), 'welcome.html must NOT include AresSidebar');
+
+  // SECURITY: Preauth pages must not link to internal navigation tabs
+  assert.ok(!loginContent.includes('href="./apps.html"'), 'login.html must not expose authenticated apps link');
+  assert.ok(!loginContent.includes('href="./config.html"'), 'login.html must not expose authenticated config link');
+  assert.ok(!welcomeContent.includes('href="./apps.html"'), 'welcome.html must not expose authenticated apps link');
+  assert.ok(!welcomeContent.includes('href="./config.html"'), 'welcome.html must not expose authenticated config link');
+
+  // Login endpoints & flows
+  assert.ok(loginContent.includes('./api/login'), 'login.html must call ./api/login');
+  assert.ok(loginContent.includes('localStorage'), 'login.html must maintain optional remember credentials');
+
+  // Welcome endpoints & flows
+  assert.ok(welcomeContent.includes('./api/password'), 'welcome.html must call ./api/password');
+  assert.ok(welcomeContent.includes('ResourceCard'), 'welcome.html must include ResourceCard');
+
+  // Both have ThemeToggle for accessible preauth theme switching
+  assert.ok(loginContent.includes('ThemeToggle'), 'login.html must support ThemeToggle');
+  assert.ok(welcomeContent.includes('ThemeToggle'), 'welcome.html must support ThemeToggle');
+});
+
+test('[Static Contract] AresSidebar.vue focus-trap and dropdown safety', () => {
   const content = fs.readFileSync(path.join(webDir, 'AresSidebar.vue'), 'utf8');
 
   // Scoped dropdown check
@@ -181,4 +264,7 @@ test('AresSidebar.vue focus-trap and dropdown safety', () => {
     !content.includes("if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value && !isBootstrapDropdownOpen())"),
     'Must not globally disable Tab on dropdown open'
   );
+
+  // Must detect open dropdown and close dropdown layer first before closing mobile drawer
+  assert.ok(content.includes('openDropdown'), 'Escape handler must detect openDropdown');
 });

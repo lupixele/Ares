@@ -3,59 +3,132 @@
 
 <head>
   <%- header %>
+  <style>
+    /* ── Pre-auth Shell & Modern Card ── */
+    .preauth-layout {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    .preauth-card {
+      width: 100%;
+      max-width: 440px;
+      border: 1px solid var(--bs-border-color);
+      border-radius: 14px;
+      background: var(--bs-body-bg);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+
+    .preauth-header {
+      text-align: center;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--bs-border-color);
+      margin-bottom: 1.5rem;
+    }
+
+    .preauth-logo {
+      height: 48px;
+      margin-bottom: 0.75rem;
+    }
+
+    .preauth-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+
+    .preauth-topbar {
+      position: absolute;
+      top: 1rem;
+      right: 1.5rem;
+      z-index: 10;
+    }
+
+    .config-field-label {
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin-bottom: 0.25rem;
+    }
+  </style>
 </head>
 
 <body id="app" v-cloak>
-  <main role="main" style="max-width: 1200px; margin: 1em auto">
-    <div class="d-flex justify-content-center">
-      <div class="card p-2">
-        <header>
-          <h1 class="mb-0">
-            <img src="/images/logo-apollo-45.png" height="45" alt="">
-            {{ $t('welcome.greeting') }}
-          </h1>
-        </header>
-        <form @submit.prevent="login" class="mt-4">
-          <div class="mb-2">
-            <label for="usernameInput" class="form-label">{{ $t('_common.username') }}</label>
+  <div class="preauth-topbar">
+    <ThemeToggle />
+  </div>
+
+  <main role="main" class="preauth-layout">
+    <div class="card preauth-card p-4">
+      <header class="preauth-header">
+        <img src="/images/logo-apollo-45.png" class="preauth-logo" alt="Ares logo">
+        <h1 class="preauth-title mb-0">
+          {{ $t('welcome.greeting') }}
+        </h1>
+      </header>
+
+      <form @submit.prevent="login">
+        <div class="mb-3">
+          <label for="usernameInput" class="form-label config-field-label">{{ $t('_common.username') }}</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="fas fa-user" aria-hidden="true"></i></span>
             <input type="text" class="form-control" id="usernameInput" autocomplete="username"
-              v-model="passwordData.username" required autofocus/>
+              v-model="passwordData.username" required autofocus />
           </div>
-          <div class="mb-2">
-            <label for="passwordInput" class="form-label">{{ $t('_common.password') }}</label>
-            <input type="password" class="form-control" id="passwordInput" autocomplete="password"
+        </div>
+
+        <div class="mb-3">
+          <label for="passwordInput" class="form-label config-field-label">{{ $t('_common.password') }}</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="fas fa-lock" aria-hidden="true"></i></span>
+            <input type="password" class="form-control" id="passwordInput" autocomplete="current-password"
               v-model="passwordData.password" required />
           </div>
-          <div class="mb-3 form-check">
-            <label for="savePassword" class="form-check-label">{{ $t('login.save_password') }}</label>
-            <input type="checkbox" class="form-check-input" id="savePassword" v-model="savePassword"/>
-          </div>
-          <button type="submit" class="btn btn-primary w-100 mb-2" v-bind:disabled="loading">
-            {{ $t('welcome.login') }}
-          </button>
-          <div class="alert alert-danger" v-if="error"><b>{{ $t('_common.error') }}</b> {{error}}</div>
-          <div class="alert alert-success" v-if="success">
-            <b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}
-          </div>
-        </form>
-      </div>
+        </div>
+
+        <div class="mb-3 form-check">
+          <input type="checkbox" class="form-check-input" id="savePassword" v-model="savePassword"/>
+          <label for="savePassword" class="form-check-label">{{ $t('login.save_password') }}</label>
+        </div>
+
+        <button type="submit" class="btn btn-primary w-100 py-2 mb-3" :disabled="loading">
+          <span v-if="loading" class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+          <i v-else class="fas fa-sign-in-alt me-1" aria-hidden="true"></i>
+          {{ $t('welcome.login') }}
+        </button>
+
+        <div class="alert alert-danger d-flex align-items-center mb-0" v-if="error">
+          <i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>
+          <div><b>{{ $t('_common.error') }}</b> {{error}}</div>
+        </div>
+
+        <div class="alert alert-success d-flex align-items-center mb-0" v-if="success">
+          <i class="fas fa-check-circle me-2" aria-hidden="true"></i>
+          <div><b>{{ $t('_common.success') }}</b> {{ $t('welcome.login_success') }}</div>
+        </div>
+      </form>
     </div>
   </main>
 </body>
 
 <script type="module">
-  import { createApp, ref, onMounted } from "vue"
-  import { loadAutoTheme } from './theme'
+  import { createApp, ref } from 'vue'
   import { initApp } from './init'
+  import ThemeToggle from './ThemeToggle.vue'
 
   let app = createApp({
-    setup() {
-      loadAutoTheme()
-
-      const error = ref('');
-      const success = ref(false);
-      const loading = ref(false);
-      const savePassword = ref(false);
+    components: {
+      ThemeToggle
+    },
+    data() {
+      const error = ref(null)
+      const success = ref(false)
+      const loading = ref(false)
+      const savePassword = ref(false)
 
       const data = {
         error,
@@ -68,7 +141,13 @@
         }
       }
 
-      const savedPasswordStr = localStorage.getItem('login')
+      let savedPasswordStr = null
+      try {
+        savedPasswordStr = localStorage.getItem('login')
+      } catch (e) {
+        console.error('Reading localStorage failed!', e)
+      }
+
       if (savedPasswordStr) {
         try {
           const { username, password } = JSON.parse(savedPasswordStr);
@@ -89,7 +168,11 @@
         this.error = null;
         this.loading = true;
         if (!this.savePassword) {
-          localStorage.removeItem('login')
+          try {
+            localStorage.removeItem('login')
+          } catch (e) {
+            console.error('Removing login from localStorage failed!', e)
+          }
         }
         fetch("./api/login", {
           headers: {
@@ -102,7 +185,11 @@
           if (res.status === 200) {
             this.success = true;
             if (this.savePassword) {
-              localStorage.setItem('login', JSON.stringify(this.passwordData));
+              try {
+                localStorage.setItem('login', JSON.stringify(this.passwordData));
+              } catch (e) {
+                console.error('Saving login to localStorage failed!', e)
+              }
             }
             const url = new URL(window.location);
             const redirectUrl = url.searchParams.get('redir');
@@ -114,17 +201,19 @@
             }
           } else {
             if (res.status === 401) {
-              throw new Error('Please check your username and password')
+              throw this.$t('login.auth_failed');
             } else {
-              throw new Error(`Server returned ${res.status}`);
+              throw this.$t('_common.error') + ` ${res.status}`;
             }
           }
         }).catch((e) => {
-          this.error = `Login failed: ${e.message}`;
+          this.loading = false;
+          this.error = e;
         });
-      },
-    },
+      }
+    }
   });
 
   initApp(app);
 </script>
+</html>

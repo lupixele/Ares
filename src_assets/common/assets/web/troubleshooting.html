@@ -2,130 +2,214 @@
 <html lang="en" data-bs-theme="auto">
 
 <head>
-      <%- header %>
-      <style>
-        .troubleshooting-logs {
-          white-space: pre;
-          font-family: monospace;
-          overflow: auto;
-          max-height: 500px;
-          min-height: 500px;
-          font-size: 16px;
-          position: relative;
-        }
+  <%- header %>
+  <style>
+    /* ── Overview & Page Header ── */
+    .ares-overview__header {
+      border-bottom: 1px solid var(--bs-border-color);
+      padding-bottom: 1rem;
+      margin-bottom: 1.5rem;
+      width: 100%;
+    }
+    .ares-overview__title {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .ares-overview__desc {
+      font-size: 0.95rem;
+    }
 
-        .copy-icon {
-          position: absolute;
-          top: 8px;
-          right: 8px;
-          padding: 8px;
-          cursor: pointer;
-          color: rgba(0, 0, 0, 1);
-          appearance: none;
-          border: none;
-          background: none;
-        }
+    /* ── Modern Cards ── */
+    .ares-card {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 12px;
+      background: var(--bs-body-bg);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+      margin-bottom: 1.5rem;
+    }
 
-        .copy-icon:hover {
-          color: rgba(0, 0, 0, 0.75);
-        }
+    .config-section__title {
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--bs-secondary-color);
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
 
-        .copy-icon:active {
-          color: rgba(0, 0, 0, 1);
-        }
-      </style>
+    .troubleshooting-logs {
+      white-space: pre;
+      font-family: var(--bs-font-monospace, monospace);
+      overflow: auto;
+      max-height: 500px;
+      min-height: 400px;
+      font-size: 14px;
+      position: relative;
+      background: var(--bs-tertiary-bg, rgba(0, 0, 0, 0.03));
+      border: 1px solid var(--bs-border-color);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    .copy-icon {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 6px 12px;
+      cursor: pointer;
+      appearance: none;
+      border: 1px solid var(--bs-border-color);
+      border-radius: 6px;
+      background: var(--bs-body-bg);
+      color: var(--bs-body-color);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+      transition: all 0.15s ease;
+      z-index: 2;
+    }
+
+    .copy-icon:hover {
+      background: var(--bs-secondary-bg);
+      color: var(--bs-primary);
+    }
+  </style>
 </head>
 
 <body id="app" v-cloak>
   <AresSidebar></AresSidebar>
   <div class="ares-page-body container">
-    <h1 class="my-4">{{ $t('troubleshooting.troubleshooting') }}</h1>
+    <div class="ares-overview__header my-4">
+      <h1 class="ares-overview__title">{{ $t('troubleshooting.troubleshooting') }}</h1>
+      <p class="ares-overview__desc text-muted mb-0">{{ $t('troubleshooting.logs_desc') }}</p>
+    </div>
+
     <!-- Force Close App -->
-    <div class="card p-2 my-4">
+    <div class="card ares-card p-2 my-4">
       <div class="card-body">
-        <h2 id="close_apps">{{ $t('troubleshooting.force_close') }}</h2>
-        <br>
-        <p>{{ $t('troubleshooting.force_close_desc') }}</p>
-        <div class="alert alert-success" v-if="closeAppStatus === true">
-          {{ $t('troubleshooting.force_close_success') }}
+        <div class="config-section__title">
+          <i class="fas fa-ban text-warning" aria-hidden="true"></i>
+          <span>{{ $t('troubleshooting.force_close') }}</span>
         </div>
-        <div class="alert alert-danger" v-if="closeAppStatus === false">
-          {{ $t('troubleshooting.force_close_error') }}
+        <h2 id="close_apps" class="h5 mt-2">{{ $t('troubleshooting.force_close') }}</h2>
+        <p class="text-muted">{{ $t('troubleshooting.force_close_desc') }}</p>
+        <div class="alert alert-success d-flex align-items-center" v-if="closeAppStatus === true">
+          <i class="fas fa-check-circle me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.force_close_success') }}</div>
+        </div>
+        <div class="alert alert-danger d-flex align-items-center" v-if="closeAppStatus === false">
+          <i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.force_close_error') }}</div>
         </div>
         <div>
           <button class="btn btn-warning" :disabled="closeAppPressed" @click="closeApp">
+            <span v-if="closeAppPressed" class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+            <i v-else class="fas fa-stop me-1" aria-hidden="true"></i>
             {{ $t('troubleshooting.force_close') }}
           </button>
         </div>
       </div>
     </div>
-    <!-- Restart Apollo -->
-    <div class="card p-2 my-4">
+
+    <!-- Restart Apollo / Ares -->
+    <div class="card ares-card p-2 my-4">
       <div class="card-body">
-        <h2 id="restart">{{ $t('troubleshooting.restart_apollo') }}</h2>
-        <br>
-        <p>{{ $t('troubleshooting.restart_apollo_desc') }}</p>
-        <div class="alert alert-success" v-if="serverRestarting">
-          {{ $t('troubleshooting.restart_apollo_success') }}
+        <div class="config-section__title">
+          <i class="fas fa-redo text-warning" aria-hidden="true"></i>
+          <span>{{ $t('troubleshooting.restart_apollo') }}</span>
+        </div>
+        <h2 id="restart" class="h5 mt-2">{{ $t('troubleshooting.restart_apollo') }}</h2>
+        <p class="text-muted">{{ $t('troubleshooting.restart_apollo_desc') }}</p>
+        <div class="alert alert-success d-flex align-items-center" v-if="serverRestarting">
+          <i class="fas fa-info-circle me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.restart_apollo_success') }}</div>
         </div>
         <div>
-          <button class="btn btn-warning" :disabled="serverQuitting || serverRestarting" @click="restart">
+          <button class="btn btn-warning" :disabled="serverRestarting || serverQuitting" @click="restart">
+            <span v-if="serverRestarting" class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+            <i v-else class="fas fa-sync-alt me-1" aria-hidden="true"></i>
             {{ $t('troubleshooting.restart_apollo') }}
           </button>
         </div>
       </div>
     </div>
-    <!-- Quit Apollo -->
-    <div class="card p-2 my-4">
+
+    <!-- Quit Apollo / Ares -->
+    <div class="card ares-card p-2 my-4">
       <div class="card-body">
-        <h2 id="quit">{{ $t('troubleshooting.quit_apollo') }}</h2>
-        <br>
-        <p>{{ $t('troubleshooting.quit_apollo_desc') }}</p>
-        <div class="alert alert-success" v-if="serverQuit">
-          {{ $t('troubleshooting.quit_apollo_success') }}
+        <div class="config-section__title">
+          <i class="fas fa-power-off text-danger" aria-hidden="true"></i>
+          <span>{{ $t('troubleshooting.quit_apollo') }}</span>
         </div>
-        <div class="alert alert-success" v-if="serverQuitting">
-          {{ $t('troubleshooting.quit_apollo_success_ongoing') }}
+        <h2 id="quit" class="h5 mt-2">{{ $t('troubleshooting.quit_apollo') }}</h2>
+        <p class="text-muted">{{ $t('troubleshooting.quit_apollo_desc') }}</p>
+        <div class="alert alert-success d-flex align-items-center" v-if="serverQuit">
+          <i class="fas fa-check-circle me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.quit_apollo_success') }}</div>
+        </div>
+        <div class="alert alert-info d-flex align-items-center" v-if="serverQuitting">
+          <i class="fas fa-spinner fa-spin me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.quit_apollo_success_ongoing') }}</div>
         </div>
         <div>
-          <button class="btn btn-warning" :disabled="serverQuitting || serverRestarting" @click="quit">
+          <button class="btn btn-danger" :disabled="serverQuitting || serverRestarting" @click="quit">
+            <span v-if="serverQuitting" class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+            <i v-else class="fas fa-power-off me-1" aria-hidden="true"></i>
             {{ $t('troubleshooting.quit_apollo') }}
           </button>
         </div>
       </div>
     </div>
+
     <!-- Reset persistent display device settings -->
-    <div class="card p-2 my-4" v-if="platform === 'windows'">
+    <div class="card ares-card p-2 my-4" v-if="platform === 'windows'">
       <div class="card-body">
-        <h2 id="dd_reset">{{ $t('troubleshooting.dd_reset') }}</h2>
-        <br>
-        <p style="white-space: pre-line">{{ $t('troubleshooting.dd_reset_desc') }}</p>
-        <div class="alert alert-success" v-if="ddResetStatus === true">
-          {{ $t('troubleshooting.dd_reset_success') }}
+        <div class="config-section__title">
+          <i class="fas fa-tv text-warning" aria-hidden="true"></i>
+          <span>{{ $t('troubleshooting.dd_reset') }}</span>
         </div>
-        <div class="alert alert-danger" v-if="ddResetStatus === false">
-          {{ $t('troubleshooting.dd_reset_error') }}
+        <h2 id="dd_reset" class="h5 mt-2">{{ $t('troubleshooting.dd_reset') }}</h2>
+        <p class="text-muted" style="white-space: pre-line">{{ $t('troubleshooting.dd_reset_desc') }}</p>
+        <div class="alert alert-success d-flex align-items-center" v-if="ddResetStatus === true">
+          <i class="fas fa-check-circle me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.dd_reset_success') }}</div>
+        </div>
+        <div class="alert alert-danger d-flex align-items-center" v-if="ddResetStatus === false">
+          <i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>
+          <div>{{ $t('troubleshooting.dd_reset_error') }}</div>
         </div>
         <div>
           <button class="btn btn-warning" :disabled="ddResetPressed" @click="ddResetPersistence">
+            <span v-if="ddResetPressed" class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+            <i v-else class="fas fa-undo me-1" aria-hidden="true"></i>
             {{ $t('troubleshooting.dd_reset') }}
           </button>
         </div>
       </div>
     </div>
+
     <!-- Logs -->
-    <div class="card p-2 my-4">
+    <div class="card ares-card p-2 my-4">
       <div class="card-body">
-        <h2 id="logs">{{ $t('troubleshooting.logs') }}</h2>
-        <br>
-        <div class="d-flex justify-content-between align-items-baseline py-2">
-          <p>{{ $t('troubleshooting.logs_desc') }}</p>
-          <input type="text" class="form-control" v-model="logFilter" :placeholder="$t('troubleshooting.logs_find')" style="width: 300px">
+        <div class="config-section__title">
+          <i class="fas fa-terminal text-info" aria-hidden="true"></i>
+          <span>{{ $t('troubleshooting.logs') }}</span>
         </div>
-        <div>
-          <div class="troubleshooting-logs">
-            <button class="copy-icon"><i class="fas fa-copy " @click="copyLogs"></i></button>{{actualLogs}}
+        <h2 id="logs" class="h5 mt-2">{{ $t('troubleshooting.logs') }}</h2>
+        <div class="d-flex flex-column flex-sm-row justify-content-between align-items-sm-center gap-2 py-2">
+          <p class="text-muted mb-0">{{ $t('troubleshooting.logs_desc') }}</p>
+          <div class="input-group" style="max-width: 320px">
+            <span class="input-group-text"><i class="fas fa-search" aria-hidden="true"></i></span>
+            <input type="text" class="form-control" v-model="logFilter" :placeholder="$t('troubleshooting.logs_find')" aria-label="Filter logs">
           </div>
+        </div>
+        <div class="position-relative mt-2">
+          <button class="copy-icon" @click="copyLogs" title="Copy logs to clipboard" type="button">
+            <i class="fas fa-copy me-1" aria-hidden="true"></i> Copy
+          </button>
+          <div class="troubleshooting-logs">{{actualLogs}}</div>
         </div>
       </div>
     </div>
@@ -166,37 +250,31 @@
         }
       },
       created() {
-        fetch("/api/config")
+        fetch("/api/config", { credentials: 'include' })
           .then((r) => r.json())
           .then((r) => {
             this.platform = r.platform;
-          });
+          })
+          .catch((e) => console.error("Error fetching config:", e));
 
+        this.getLogs();
         this.logInterval = setInterval(() => {
-          this.refreshLogs();
-        }, 5000);
-        this.refreshLogs();
+          this.getLogs();
+        }, 1000);
       },
-      beforeDestroy() {
+      unmounted() {
         clearInterval(this.logInterval);
       },
       methods: {
-        refreshLogs() {
+        getLogs() {
           fetch("./api/logs", {
             credentials: 'include'
           })
             .then(response => {
-              // Retrieve the Content-Type header
-              const contentType = response.headers.get("Content-Type") || "";
-              // Attempt to extract charset from the header
-              const charsetMatch = contentType.match(/charset=([^;]+)/i);
-              const charset = charsetMatch ? charsetMatch[1].trim() : "utf-8";
-
-              // Read response as an ArrayBuffer and decode it with the correct charset
-              return response.arrayBuffer().then(buffer => {
-                const decoder = new TextDecoder(charset);
-                return decoder.decode(buffer);
-              });
+              if (response.status !== 200) {
+                return "Waiting for response...";
+              }
+              return response.text();
             })
             .then(text => {
               this.logs = text;
@@ -219,6 +297,11 @@
               setTimeout(() => {
                 this.closeAppStatus = null;
               }, 5000);
+            })
+            .catch((err) => {
+              this.closeAppPressed = false;
+              this.closeAppStatus = false;
+              console.error(err);
             });
         },
         copyLogs() {
@@ -290,6 +373,11 @@
               setTimeout(() => {
                 this.ddResetStatus = null;
               }, 5000);
+            })
+            .catch((err) => {
+              this.ddResetPressed = false;
+              this.ddResetStatus = false;
+              console.error(err);
             });
         },
       },
@@ -297,5 +385,5 @@
 
     initApp(app);
   </script>
-
 </body>
+</html>

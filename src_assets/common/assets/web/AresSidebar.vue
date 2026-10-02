@@ -184,19 +184,36 @@ function getVisibleFocusable(container) {
 function onKeyDown(e) {
   // Escape closes open dropdown inside sidebar first; if none, closes mobile sidebar
   if (e.key === 'Escape' && mobileOpen.value) {
-    if (isSidebarDropdownOpen()) return
+    const openDropdown = sidebarEl.value?.querySelector('.dropdown-menu.show')
+    if (openDropdown) {
+      // Find toggle element that controls this dropdown and close via Bootstrap or click
+      const toggle = sidebarEl.value.querySelector('[data-bs-toggle="dropdown"][aria-expanded="true"]')
+      if (toggle) {
+        toggle.click()
+        toggle.focus()
+      } else {
+        openDropdown.classList.remove('show')
+      }
+      return
+    }
     mobileOpen.value = false
   }
-  // Trap Tab within sidebar when mobile sheet is open — without globally disabling Tab on dropdowns
+  // Trap Tab within sidebar when mobile sheet is open — without skipping dropdown focusables
   if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value) {
     const focusable = getVisibleFocusable(sidebarEl.value)
     if (!focusable.length) return
     const first = focusable[0]
     const last = focusable[focusable.length - 1]
     if (e.shiftKey) {
-      if (document.activeElement === first) { e.preventDefault(); last.focus() }
+      if (document.activeElement === first || !sidebarEl.value.contains(document.activeElement)) {
+        e.preventDefault()
+        last.focus()
+      }
     } else {
-      if (document.activeElement === last) { e.preventDefault(); first.focus() }
+      if (document.activeElement === last || !sidebarEl.value.contains(document.activeElement)) {
+        e.preventDefault()
+        first.focus()
+      }
     }
   }
 }
