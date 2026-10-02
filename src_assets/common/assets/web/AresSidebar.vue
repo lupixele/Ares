@@ -168,21 +168,28 @@ watch(mobileOpen, (open) => {
   }
 })
 
-function isBootstrapDropdownOpen() {
-  // Check if any Bootstrap dropdown is currently shown; if so, leave Escape/Tab to Bootstrap
-  return !!document.querySelector('.dropdown-menu.show')
+function isSidebarDropdownOpen() {
+  return !!sidebarEl.value?.querySelector('.dropdown-menu.show')
+}
+
+function getVisibleFocusable(container) {
+  const elements = container.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )
+  return Array.from(elements).filter(el => {
+    return el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0
+  })
 }
 
 function onKeyDown(e) {
-  if (e.key === 'Escape' && mobileOpen.value && !isBootstrapDropdownOpen()) {
+  // Escape closes open dropdown inside sidebar first; if none, closes mobile sidebar
+  if (e.key === 'Escape' && mobileOpen.value) {
+    if (isSidebarDropdownOpen()) return
     mobileOpen.value = false
   }
-  // Trap Tab within sidebar when mobile sheet is open, but not when a dropdown is open
-  if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value && !isBootstrapDropdownOpen()) {
-    const el = sidebarEl.value
-    const focusable = Array.from(
-      el.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
-    )
+  // Trap Tab within sidebar when mobile sheet is open — without globally disabling Tab on dropdowns
+  if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value) {
+    const focusable = getVisibleFocusable(sidebarEl.value)
     if (!focusable.length) return
     const first = focusable[0]
     const last = focusable[focusable.length - 1]

@@ -435,6 +435,9 @@
 
             this.vdisplayStatus = r.vdisplayStatus;
             delete r.vdisplayStatus;
+            delete r.platform;
+            delete r.status;
+            delete r.version;
 
             this.config = r;
 
@@ -487,12 +490,20 @@
       },
       save() {
         this.saveError = false;
+
+        // Validate fallback mode
+        if (this.config.fallback_mode && !this.config.fallback_mode.match(/^\d+x\d+x\d+$/)) {
+          this.config.fallback_mode = fallbackDisplayModeCache;
+        } else {
+          fallbackDisplayModeCache = this.config.fallback_mode;
+        }
+
         let config = JSON.parse(JSON.stringify(this.config));
 
-        // Synchronize command arrays into config before saving
-        config.global_prep_cmd = JSON.parse(JSON.stringify(this.global_prep_cmd));
-        config.global_state_cmd = JSON.parse(JSON.stringify(this.global_state_cmd));
-        config.server_cmd = JSON.parse(JSON.stringify(this.server_cmd));
+        // Synchronize and filter command arrays into config before saving
+        config.global_prep_cmd = this.global_prep_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
+        config.global_state_cmd = this.global_state_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
+        config.server_cmd = this.server_cmd.filter(cmd => (cmd.name && cmd.cmd && cmd.name.trim() && cmd.cmd.trim()));
 
         // delete default values from this.config
         this.tabs.forEach(tab => {

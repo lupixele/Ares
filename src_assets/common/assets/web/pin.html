@@ -5,206 +5,483 @@
   <%- header %>
 
   <script type="text/javascript" src="/assets/js/qrcode.min.js"></script>
-  <style scoped type="text/css">
-    .content-container {
-      padding-top: 2em;
+  <style>
+    /* ── Overview & Page Header ── */
+    .ares-overview__header {
+      border-bottom: 1px solid var(--bs-border-color);
+      padding-bottom: 1rem;
+      margin-bottom: 1.5rem;
+      width: 100%;
+    }
+    .ares-overview__title {
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .ares-overview__desc {
+      font-size: 0.95rem;
+    }
+
+    /* ── Pairing Cards ── */
+    .ares-card {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 12px;
+      background: var(--bs-body-bg);
+      width: 100%;
+    }
+
+    .pairing-card {
+      max-width: 520px;
+      margin: 0 auto 1.5rem auto;
+      border: 1px solid var(--bs-border-color);
+      border-radius: 12px;
+      background: var(--bs-body-bg);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
     }
 
     .pin-tab-bar {
-      margin-bottom: 2em !important;
+      margin-bottom: 1.5rem !important;
+    }
+
+    /* ── Client List & Items ── */
+    .ares-client-item {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 10px;
+      margin-bottom: 0.75rem;
+      background: var(--bs-body-bg);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .ares-client-item:hover {
+      border-color: var(--bs-border-color-translucent);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .ares-client-item--editing {
+      border-color: var(--bs-primary);
+      box-shadow: 0 0 0 1px var(--bs-primary);
+    }
+
+    .config-section__title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--bs-secondary-color);
+      padding-bottom: 0.5rem;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid var(--bs-border-color);
+    }
+
+    /* ── Monospace inputs & tables ── */
+    .monospace {
+      font-family: monospace;
+    }
+
+    /* ── Pulsing connected indicator ── */
+    .ares-pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--bs-success);
+      display: inline-block;
+      box-shadow: 0 0 0 0 rgba(25, 135, 84, 0.7);
+      animation: ares-pulse 1.8s infinite;
+    }
+    @keyframes ares-pulse {
+      0% { box-shadow: 0 0 0 0 rgba(25, 135, 84, 0.7); }
+      70% { box-shadow: 0 0 0 8px rgba(25, 135, 84, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(25, 135, 84, 0); }
     }
   </style>
 </head>
 
 <body id="app" v-cloak>
   <AresSidebar></AresSidebar>
-  <div id="content" class="ares-page-body container content-container d-flex flex-column align-items-center">
+  <div id="content" class="ares-page-body container">
+
+    <!-- Header -->
+    <div class="ares-overview__header my-4">
+      <h1 class="ares-overview__title">{{ $t('navbar.pin') }} &amp; {{ $t('pin.device_management') }}</h1>
+      <p class="ares-overview__desc text-muted mb-0">Pair Moonlight/Artemis clients with PIN or OTP, and manage per-device access permissions.</p>
+    </div>
+
+    <!-- Mode Selector Tabs -->
     <ul class="nav nav-pills pin-tab-bar justify-content-center">
       <li class="nav-item">
-        <a class="nav-link" :class="{active: currentTab !== '#PIN'}" href="#OTP" @click.prevent="switchTab('OTP')">{{ $t('pin.otp_pairing') }}</a>
+        <a class="nav-link" :class="{active: currentTab !== '#PIN'}" href="#OTP" @click.prevent="switchTab('OTP')">
+          <i class="fas fa-qrcode me-1"></i> {{ $t('pin.otp_pairing') }}
+        </a>
       </li>
       <li class="nav-item">
-        <a class="nav-link" :class="{active: currentTab === '#PIN'}" href="#PIN" @click.prevent="switchTab('PIN')">{{ $t('pin.pin_pairing') }}</a>
+        <a class="nav-link" :class="{active: currentTab === '#PIN'}" href="#PIN" @click.prevent="switchTab('PIN')">
+          <i class="fas fa-key me-1"></i> {{ $t('pin.pin_pairing') }}
+        </a>
       </li>
     </ul>
-    <form v-if="currentTab === '#PIN'" class="form d-flex flex-column align-items-center" id="form" @submit.prevent="registerDevice">
-      <div class="card flex-column d-flex p-4 mb-4">
-        <input type="text" pattern="\d*" :placeholder="`${$t('navbar.pin')}`" autofocus id="pin-input" class="form-control mt-2" required />
-        <input type="text" :placeholder="`${$t('pin.device_name')}`" id="name-input" class="form-control my-4" />
-        <button class="btn btn-primary">{{ $t('pin.send') }}</button>
-      </div>
-      <div id="status"></div>
-    </form>
-    <form v-else class="form d-flex flex-column align-items-center" @submit.prevent="requestOTP">
-      <div class="card flex-column d-flex p-4 mb-4">
-        <div v-show="editingHost || (otp && hostAddr)" id="qrRef"></div>
-        <p v-if="editingHost || (otp && hostAddr)" class="text-center text-secondary"><a class="text-secondary" :href="deepLink">art://{{ hostAddr }}:{{ hostPort }}</a> <i class="fas fa-fw fa-pen-to-square" @click="editHost"></i></p>
-        <h1 class="mb-4 text-center">{{ otp && otp || '????' }}</h1>
-        <div v-if="editingHost" class="d-flex flex-column align-items-stretch">
-          <input type="text" placeholder="HOST" v-model="hostAddr" autofocus class="form-control mt-2" />
-          <input type="text" placeholder="PORT" v-model="hostPort" class="form-control my-4" />
-          <button class="btn btn-primary" :disabled="!this.canSaveHost" @click.prevent="saveHost">{{ $t('_common.save') }}</button>
+
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- PIN Pairing Tab Form                                       -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <div v-if="currentTab === '#PIN'" class="w-100">
+      <form class="form pairing-card p-4" id="form" @submit.prevent="registerDevice">
+        <h5 class="fw-semibold text-center mb-3">{{ $t('pin.pin_pairing') }}</h5>
+        <p class="text-muted small text-center mb-3">Enter the 4-digit PIN displayed on your Moonlight or Artemis client screen.</p>
+
+        <div class="mb-3">
+          <label for="pin-input" class="form-label fw-semibold">{{ $t('navbar.pin') }} <span class="text-danger">*</span></label>
+          <input
+            type="text"
+            pattern="\d*"
+            maxlength="4"
+            :placeholder="`${$t('navbar.pin')}`"
+            autofocus
+            id="pin-input"
+            class="form-control form-control-lg text-center font-monospace"
+            style="letter-spacing: 0.25em; font-size: 1.5rem;"
+            required
+          />
         </div>
-        <div v-else class="d-flex flex-column align-items-stretch">
-          <input type="text" pattern="[0-9a-zA-Z]{4,}" :placeholder="`${$t('pin.otp_passphrase')}`" v-model="passphrase" required autofocus class="form-control mt-2" />
-          <input type="text" :placeholder="`${$t('pin.device_name')}`" v-model="deviceName" class="form-control my-4" />
-          <button class="btn btn-primary">{{ $t('pin.generate_pin') }}</button>
+
+        <div class="mb-4">
+          <label for="name-input" class="form-label fw-semibold">{{ $t('pin.device_name') }}</label>
+          <input
+            type="text"
+            :placeholder="`${$t('pin.device_name')}`"
+            id="name-input"
+            class="form-control"
+          />
         </div>
-      </div>
-      <div v-if="otpMessage" class="alert" :class="['alert-' + otpStatus]">{{ otpMessage }}</div>
-      <div class="alert alert-info">{{ $t('pin.otp_msg') }}</div>
-    </form>
-    <div class="alert alert-warning">
-      <b>{{ $t('_common.warning') }}</b> {{ $t('pin.warning_msg') }}
+
+        <button class="btn btn-primary btn-lg w-100 fw-semibold">
+          <i class="fas fa-paper-plane me-1"></i> {{ $t('pin.send') }}
+        </button>
+
+        <div id="status" class="mt-3"></div>
+      </form>
     </div>
-    <!-- Manage Clients -->
-    <div class="card my-4 align-self-stretch">
-      <div class="card-body">
-        <div class="p-2">
-          <div class="d-flex justify-content-end align-items-center">
-            <h2 id="unpair" class="me-auto">{{ $t('pin.device_management') }}</h2>
-            <button class="btn btn-danger" :disabled="unpairAllPressed" @click="unpairAll">
-              {{ $t('pin.unpair_all') }}
-            </button>
+
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- OTP Pairing Tab Form                                       -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <div v-else class="w-100">
+      <form class="form pairing-card p-4" @submit.prevent="requestOTP">
+        <h5 class="fw-semibold text-center mb-2">{{ $t('pin.otp_pairing') }}</h5>
+        <p class="text-muted small text-center mb-3">{{ $t('pin.otp_msg') }}</p>
+
+        <div class="d-flex flex-column align-items-center">
+          <div v-show="editingHost || (otp && hostAddr)" id="qrRef" class="p-2 border rounded bg-white shadow-sm mb-3"></div>
+
+          <p
+            v-if="otp && hostAddr && !editingHost"
+            class="mb-3 text-center fw-bold fs-3 font-monospace py-2 px-4 rounded bg-body-secondary text-primary"
+            style="letter-spacing: 0.15em;"
+          >
+            {{ otp }}
+          </p>
+
+          <div v-if="otp && !editingHost" class="w-100 mb-3 p-3 border rounded small bg-body-tertiary">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <span class="text-secondary fw-semibold">Connection Endpoint</span>
+              <a href="#" class="text-decoration-none small" @click.prevent="editHost">
+                <i class="fas fa-pen-to-square me-1"></i> {{ $t('config.edit') }}
+              </a>
+            </div>
+            <div class="font-monospace text-truncate">
+              {{ hostAddr }}:{{ hostPort }}
+            </div>
           </div>
-          <br />
-          <p class="mb-0">{{ $t('pin.device_management_desc') }}</p>
-          <p class="mb-0">{{ $t('pin.device_management_warning') }} <a href="https://github.com/ClassicOldSong/Apollo/wiki/Permission-System" target="_blank">{{ $t('_common.learn_more') }}</a></p>
-          <div id="apply-alert" class="alert alert-success d-flex align-items-center mt-3" :style="{ 'display': (showApplyMessage ? 'flex !important': 'none !important') }">
-            <div class="me-2"><b>{{ $t('_common.success') }}</b> {{ $t('pin.unpair_single_success') }}</div>
-            <button class="btn btn-success ms-auto apply" @click="clickedApplyBanner">{{ $t('_common.dismiss') }}</button>
+
+          <div v-if="editingHost" class="w-100 mb-3 p-3 border rounded bg-body-tertiary">
+            <div class="mb-3">
+              <label for="hostAddr" class="form-label small fw-semibold">Host IP / Address</label>
+              <input type="text" id="hostAddr" v-model="hostAddr" class="form-control font-monospace" placeholder="e.g. 192.168.1.100" />
+            </div>
+            <div class="mb-3">
+              <label for="hostPort" class="form-label small fw-semibold">Host Port</label>
+              <input type="text" id="hostPort" v-model="hostPort" class="form-control font-monospace" placeholder="47989" />
+            </div>
+            <div class="d-flex gap-2">
+              <button type="button" class="btn btn-sm btn-primary flex-grow-1" :disabled="!canSaveHost" @click="saveHost">
+                <i class="fas fa-check me-1"></i> {{ $t('_common.save') }}
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" @click="editingHost = false">
+                {{ $t('_common.cancel') }}
+              </button>
+            </div>
           </div>
-          <div class="alert alert-success mt-3" v-if="unpairAllStatus === true">
-            {{ $t('pin.unpair_all_success') }}
+
+          <div class="w-100 mb-3">
+            <label for="otpDeviceName" class="form-label fw-semibold">{{ $t('pin.device_name') }}</label>
+            <input
+              type="text"
+              id="otpDeviceName"
+              :placeholder="`${$t('pin.device_name')}`"
+              v-model="deviceName"
+              class="form-control"
+            />
           </div>
-          <div class="alert alert-danger mt-3" v-if="unpairAllStatus === false">
-            {{ $t('pin.unpair_all_error') }}
+
+          <button class="btn btn-primary btn-lg w-100 fw-semibold">
+            <i class="fas fa-key me-1"></i> {{ $t('pin.generate_pin') }}
+          </button>
+        </div>
+
+        <div v-if="otpMessage" class="alert mt-3 mb-0" :class="['alert-' + otpStatus]">{{ otpMessage }}</div>
+      </form>
+    </div>
+
+    <!-- Security Warning Banner -->
+    <div class="alert alert-warning d-flex align-items-center gap-3 my-4 w-100 ares-card">
+      <i class="fas fa-triangle-exclamation text-warning fs-3 flex-shrink-0"></i>
+      <div class="small">
+        <b>{{ $t('_common.warning') }}</b> {{ $t('pin.warning_msg') }}
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <!-- Device Management & Paired Clients                         -->
+    <!-- ══════════════════════════════════════════════════════════ -->
+    <div class="card p-4 ares-card mb-5">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 pb-3 border-bottom mb-3">
+        <div>
+          <h3 id="unpair" class="h5 fw-bold mb-1">{{ $t('pin.device_management') }}</h3>
+          <p class="text-muted small mb-0">{{ $t('pin.device_management_desc') }}</p>
+          <div class="text-secondary small mt-1">
+            {{ $t('pin.device_management_warning') }}
+            <a href="https://github.com/ClassicOldSong/Apollo/wiki/Permission-System" target="_blank" class="text-decoration-none">
+              {{ $t('_common.learn_more') }}
+            </a>
           </div>
         </div>
+        <div>
+          <button class="btn btn-outline-danger btn-sm" :disabled="unpairAllPressed || !clients.length" @click="unpairAll">
+            <i class="fas fa-trash me-1"></i> {{ $t('pin.unpair_all') }}
+          </button>
+        </div>
       </div>
-      <ul id="client-list" class="list-group list-group-flush list-group-item-light" v-if="clients && clients.length > 0">
-        <template v-for="client in clients" class="list-group-item d-flex align-items-center">
-          <div v-if="client.editing" class="list-group-item d-flex align-items-stretch flex-column">
-            <div class="d-flex align-items-center">
-              <div class="p-2 flex-grow-1 d-flex align-items-center">
-                <span class="badge" :class="client.editPerm >= 0x04000000 ? 'bg-danger' : 'bg-primary'">
-                  [ {{permToStr(client.editPerm)}} ]
-                </span>
-                &nbsp;
-                <input v-model="client.editName" @keyup.enter="saveClient(client)" class="form-control flex-grow-1" type="text" :placeholder="$t('pin.device_name')">
+
+      <!-- Action status messages -->
+      <div id="apply-alert" class="alert alert-success d-flex align-items-center mb-3" :style="{ 'display': (showApplyMessage ? 'flex !important': 'none !important') }">
+        <div class="me-2"><b>{{ $t('_common.success') }}</b> {{ $t('pin.unpair_single_success') }}</div>
+        <button class="btn btn-sm btn-success ms-auto apply" @click="clickedApplyBanner">{{ $t('_common.dismiss') }}</button>
+      </div>
+
+      <div class="alert alert-success mb-3" v-if="unpairAllStatus === true">
+        {{ $t('pin.unpair_all_success') }}
+      </div>
+      <div class="alert alert-danger mb-3" v-if="unpairAllStatus === false">
+        {{ $t('pin.unpair_all_error') }}
+      </div>
+
+      <!-- Clients List -->
+      <div v-if="clients && clients.length > 0">
+        <div
+          v-for="client in clients"
+          :key="client.uuid"
+          class="ares-client-item p-3"
+          :class="{ 'ares-client-item--editing': client.editing }"
+        >
+          <!-- ── CLIENT VIEW ROW (NOT EDITING) ── -->
+          <div v-if="!client.editing" class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <div class="d-flex align-items-center gap-3 min-w-0">
+              <span class="badge font-monospace" :class="client.perm >= 0x04000000 ? 'bg-danger-subtle text-danger border border-danger-subtle' : 'bg-primary-subtle text-primary border border-primary-subtle'">
+                [ {{ permToStr(client.perm) }} ]
+              </span>
+              <div>
+                <div class="fw-semibold text-truncate">
+                  {{ client.name || $t('pin.unpair_single_unknown') }}
+                </div>
+                <div class="text-secondary small font-monospace">
+                  {{ client.uuid }}
+                </div>
               </div>
-              <div class="me-2 btn btn-success" @click="saveClient(client)"><i class="fas fa-check"></i></div>
-              <div class="me-2 btn btn-secondary" @click="cancelEdit(client)"><i class="fas fa-times"></i></div>
+              <span class="badge bg-success-subtle text-success border border-success-subtle d-inline-flex align-items-center gap-1" v-if="client.connected">
+                <span class="ares-pulse-dot" aria-hidden="true"></span> Connected
+              </span>
             </div>
-            <div class="align-items-top d-flex flex-row justify-content-center">
-              <div v-for="group in permissionGroups" class="d-flex flex-column mx-2">
-                <div class="mx-2">{{ group.name }}:</div>
-                <button v-for="perm in group.permissions" class="my-1 btn btn-sm" :disabled="isSuppressed(client.editPerm, perm.name, perm.suppressed_by)" :class="(isSuppressed(client.editPerm, perm.name, perm.suppressed_by) || checkPermission(client.editPerm, perm.name)) ? 'btn-success' : 'btn-outline-secondary'" @click="togglePermission(client, perm.name)">
-                  {{ $t(`permissions.${perm.name}`) }}
+
+            <!-- Client Action buttons -->
+            <div class="d-flex align-items-center gap-2">
+              <button
+                v-if="client.connected"
+                class="btn btn-outline-warning btn-sm"
+                @click="disconnectClient(client.uuid)"
+                title="Disconnect client session"
+              >
+                <i class="fas fa-link-slash me-1"></i> Disconnect
+              </button>
+              <button
+                class="btn btn-outline-primary btn-sm"
+                @click="editClient(client)"
+                :title="$t('pin.edit')"
+              >
+                <i class="fas fa-pen-to-square me-1"></i> Edit
+              </button>
+              <button
+                class="btn btn-outline-danger btn-sm"
+                @click="unpairSingle(client.uuid)"
+                title="Unpair device"
+              >
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- ── CLIENT EDITING ROW ── -->
+          <div v-else class="d-flex flex-column gap-3">
+            <!-- Edit Header / Name -->
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 pb-2 border-bottom">
+              <div class="d-flex align-items-center gap-2 flex-grow-1">
+                <span class="badge font-monospace" :class="client.editPerm >= 0x04000000 ? 'bg-danger' : 'bg-primary'">
+                  [ {{ permToStr(client.editPerm) }} ]
+                </span>
+                <input
+                  v-model="client.editName"
+                  @keyup.enter="saveClient(client)"
+                  class="form-control form-control-sm flex-grow-1"
+                  type="text"
+                  :placeholder="$t('pin.device_name')"
+                />
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <button class="btn btn-success btn-sm" @click="saveClient(client)" title="Save Client">
+                  <i class="fas fa-check me-1"></i> {{ $t('_common.save') }}
+                </button>
+                <button class="btn btn-secondary btn-sm" @click="cancelEdit(client)" title="Cancel">
+                  <i class="fas fa-times me-1"></i> {{ $t('_common.cancel') }}
                 </button>
               </div>
             </div>
 
-            <!-- Enable legacy ordering -->
-            <Checkbox class="mb-3"
-                      id="enable_legacy_ordering"
-                      label="pin.enable_legacy_ordering"
-                      desc="pin.enable_legacy_ordering_desc"
-                      v-model="client.editEnableLegacyOrdering"
-                      default="true"
-            ></Checkbox>
-
-            <!-- Always Use Virtual Display -->
-            <Checkbox class="mb-3"
-                      id="always_use_virtual_display"
-                      label="pin.always_use_virtual_display"
-                      desc="pin.always_use_virtual_display_desc"
-                      v-model="client.editAlwaysUseVirtualDisplay"
-                      default="false"
-                      v-if="platform === 'windows'"
-            ></Checkbox>
-            <!-- Display Mode Override -->
-            <div class="mb-3 mt-2">
-              <label for="display_mode_override" class="form-label">{{ $t('pin.display_mode_override') }}</label>
-              <input
-                type="text"
-                class="form-control"
-                id="display_mode_override"
-                v-model="client.editDisplayMode"
-                placeholder="1920x1080x59.94"
-                @input="validateModeOverride"
-              />
-              <div class="form-text">{{ $t('pin.display_mode_override_desc') }} <a href="https://github.com/ClassicOldSong/Apollo/wiki/Display-Mode-Override" target="_blank">{{ $t('_common.learn_more') }}</a></div>
-            </div>
-
-            <!-- Allow client commands -->
-            <Checkbox class="mb-3"
-                      id="allow_client_commands"
-                      label="pin.allow_client_commands"
-                      desc="pin.allow_client_commands_desc"
-                      v-model="client.editAllowClientCommands"
-                      default="true"
-            ></Checkbox>
-
-            <!-- connect/disconnect commands -->
-            <div class="mb-3 mt-2 d-flex flex-column" v-for="cmdType in ['do', 'undo']" v-if="client.editAllowClientCommands">
-              <label class="mb-0 orm-label">{{ $t(`pin.client_${cmdType}_cmd`) }}</label>
-              <div class="form-text">{{ $t(`pin.client_${cmdType}_cmd_desc`) }} <a href="https://github.com/ClassicOldSong/Apollo/wiki/Client-Commands" target="_blank">{{ $t('_common.learn_more') }}</a></div>
-              <table class="mt-2 table" v-if="client[`edit_${cmdType}`].length > 0">
-                <thead>
-                  <tr>
-                    <th style="width: 80%"><i class="fas fa-terminal"></i> {{ $t('_common.cmd_val') }}</th>
-                    <th style="min-width: 10em; max-width: 12em;" v-if="platform === 'windows'">
-                      <i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}
-                    </th>
-                    <th style="min-width: 110px;"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                <tr v-for="(c, i) in client[`edit_${cmdType}`]">
-                  <td>
-                    <input type="text" class="form-control monospace" v-model="c.cmd" />
-                  </td>
-                  <td v-if="platform === 'windows'">
-                    <div class="form-check">
-                      <input type="checkbox" class="form-check-input" :id="`client-${cmdType}-cmd-admin-${i}`" v-model="c.elevated"/>
-                      <label :for="`client-${cmdType}-cmd-admin-${i}`" class="form-check-label">{{ $t('_common.elevated') }}</label>
+            <!-- Permission Matrix -->
+            <div>
+              <label class="form-label fw-semibold small mb-2">Permissions Matrix</label>
+              <div class="row g-2">
+                <div v-for="group in permissionGroups" :key="group.name" class="col-12 col-md-4">
+                  <div class="p-2 border rounded bg-body-tertiary h-100">
+                    <div class="fw-semibold small text-uppercase text-secondary mb-2">{{ group.name }}</div>
+                    <div class="d-flex flex-column gap-1">
+                      <button
+                        v-for="perm in group.permissions"
+                        :key="perm.name"
+                        class="btn btn-sm text-start py-1"
+                        :disabled="isSuppressed(client.editPerm, perm.name, perm.suppressed_by)"
+                        :class="(isSuppressed(client.editPerm, perm.name, perm.suppressed_by) || checkPermission(client.editPerm, perm.name)) ? 'btn-success' : 'btn-outline-secondary'"
+                        @click="togglePermission(client, perm.name)"
+                      >
+                        <i class="fas fa-check me-1" v-if="checkPermission(client.editPerm, perm.name) && !isSuppressed(client.editPerm, perm.name, perm.suppressed_by)"></i>
+                        <i class="fas fa-ban me-1" v-else-if="isSuppressed(client.editPerm, perm.name, perm.suppressed_by)"></i>
+                        {{ $t(`permissions.${perm.name}`) }}
+                      </button>
                     </div>
-                  </td>
-                  <td>
-                    <button class="btn btn-danger me-2" @click="removeCmd(client[`edit_${cmdType}`], i)">
-                      <i class="fas fa-trash"></i>
-                    </button>
-                    <button class="btn btn-success" @click="addCmd(client[`edit_${cmdType}`], i)">
-                      <i class="fas fa-plus"></i>
-                    </button>
-                  </td>
-                </tr>
-                </tbody>
-              </table>
-              <button class="ms-0 mt-2 btn btn-success" style="margin: 0 auto" @click="addCmd(client[`edit_${cmdType}`], -1)">
-                &plus; {{ $t('config.add') }}
-              </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Client Options & Virtual Display Settings -->
+            <div class="p-3 border rounded bg-body-tertiary">
+              <Checkbox
+                class="mb-3"
+                id="enable_legacy_ordering"
+                label="pin.enable_legacy_ordering"
+                desc="pin.enable_legacy_ordering_desc"
+                v-model="client.editEnableLegacyOrdering"
+                default="true"
+              ></Checkbox>
+
+              <Checkbox
+                class="mb-3"
+                id="always_use_virtual_display"
+                label="pin.always_use_virtual_display"
+                desc="pin.always_use_virtual_display_desc"
+                v-model="client.editAlwaysUseVirtualDisplay"
+                default="false"
+                v-if="platform === 'windows'"
+              ></Checkbox>
+
+              <!-- Display Mode Override -->
+              <div class="mb-3">
+                <label for="display_mode_override" class="form-label fw-semibold small">{{ $t('pin.display_mode_override') }}</label>
+                <input
+                  type="text"
+                  class="form-control font-monospace form-control-sm"
+                  id="display_mode_override"
+                  v-model="client.editDisplayMode"
+                  placeholder="1920x1080x59.94"
+                  @input="validateModeOverride"
+                />
+                <div class="form-text small">
+                  {{ $t('pin.display_mode_override_desc') }}
+                  <a href="https://github.com/ClassicOldSong/Apollo/wiki/Display-Mode-Override" target="_blank">{{ $t('_common.learn_more') }}</a>
+                </div>
+              </div>
+
+              <!-- Allow client commands -->
+              <Checkbox
+                class="mb-3"
+                id="allow_client_commands"
+                label="pin.allow_client_commands"
+                desc="pin.allow_client_commands_desc"
+                v-model="client.editAllowClientCommands"
+                default="true"
+              ></Checkbox>
+
+              <!-- Connect / Disconnect Hook Commands -->
+              <template v-if="client.editAllowClientCommands">
+                <div class="mb-3" v-for="cmdType in ['do', 'undo']" :key="cmdType">
+                  <label class="form-label fw-semibold small mb-0">{{ $t(`pin.client_${cmdType}_cmd`) }}</label>
+                  <div class="form-text small mb-2">
+                    {{ $t(`pin.client_${cmdType}_cmd_desc`) }}
+                    <a href="https://github.com/ClassicOldSong/Apollo/wiki/Client-Commands" target="_blank">{{ $t('_common.learn_more') }}</a>
+                  </div>
+
+                  <div class="table-responsive" v-if="client[`edit_${cmdType}`].length > 0">
+                    <table class="table table-sm align-middle mb-2">
+                      <thead>
+                        <tr>
+                          <th style="width: 70%;"><i class="fas fa-terminal"></i> {{ $t('_common.cmd_val') }}</th>
+                          <th style="min-width: 8em;" v-if="platform === 'windows'">
+                            <i class="fas fa-shield-alt"></i> {{ $t('_common.run_as') }}
+                          </th>
+                          <th class="text-end" style="width: 80px;"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(c, i) in client[`edit_${cmdType}`]" :key="i">
+                          <td>
+                            <input type="text" class="form-control form-control-sm font-monospace" v-model="c.cmd" placeholder="Command to execute" />
+                          </td>
+                          <td v-if="platform === 'windows'" class="text-center">
+                            <input type="checkbox" class="form-check-input" :id="`client-${cmdType}-cmd-admin-${i}`" v-model="c.elevated" />
+                          </td>
+                          <td class="text-end">
+                            <button class="btn btn-outline-danger btn-sm" @click="removeCmd(client[`edit_${cmdType}`], i)" title="Remove">
+                              <i class="fas fa-trash"></i>
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <button class="btn btn-outline-success btn-sm" @click="addCmd(client[`edit_${cmdType}`], -1)">
+                    <i class="fas fa-plus me-1"></i> {{ $t('config.add') }}
+                  </button>
+                </div>
+              </template>
             </div>
           </div>
-          <div v-else class="list-group-item d-flex align-items-center">
-            <div class="p-2 flex-grow-1 d-flex align-items-center">
-              <span class="badge" :class="client.perm >= 0x04000000 ? 'bg-danger' : 'bg-primary'">
-                [ {{permToStr(client.perm)}} ]
-              </span>
-              &nbsp;
-              <span class="me-2">{{client.name != "" ? client.name : $t('pin.unpair_single_unknown')}}</span>
-            </div>
-            <div v-if="client.connected" class="me-2 btn btn-warning" @click="disconnectClient(client.uuid)"><i class="fas fa-link-slash"></i></div>
-            <div class="me-2 btn btn-primary" @click="editClient(client)"><i class="fas fa-edit"></i></div>
-            <div class="me-2 btn btn-danger" @click="unpairSingle(client.uuid)"><i class="fas fa-trash"></i></div>
-          </div>
-        </template>
-      </ul>
-      <ul v-else class="list-group list-group-flush list-group-item-light">
-        <div class="list-group-item p-3 text-center"><em>{{ $t('pin.unpair_single_no_devices') }}</em></div>
-      </ul>
+        </div>
+      </div>
+
+      <!-- No paired devices empty state -->
+      <div v-else class="text-center py-5 text-muted border rounded">
+        <i class="fas fa-mobile-screen fa-2x mb-2 text-secondary"></i>
+        <p class="mb-0"><em>{{ $t('pin.unpair_single_no_devices') }}</em></p>
+      </div>
     </div>
+
   </div>
 </body>
 
@@ -241,123 +518,76 @@
   }
 
   /**
-   * Permissions:
-   enum class PERM: uint32_t {
-      _reserved        = 1,
-
-      _input           = _reserved << 8,   // Input permission group
-      input_controller = _input << 0,      // Allow controller input
-      input_touch      = _input << 1,      // Allow touch input
-      input_pen        = _input << 2,      // Allow pen input
-      input_mouse      = _input << 3,      // Allow mouse input
-      input_kbd        = _input << 4,      // Allow keyboard input
-      _all_inputs      = input_controller | input_touch | input_pen | input_mouse | input_kbd,
-
-      _operation       = _input << 8,      // Operation permission group
-      clipboard_set    = _operation << 0,  // Allow set clipboard from client
-      clipboard_read   = _operation << 1,  // Allow read clipboard from host
-      file_upload      = _operation << 2,  // Allow upload files to host
-      file_dwnload     = _operation << 3,  // Allow download files from host
-      server_cmd       = _operation << 4,  // Allow execute server cmd
-      _all_opeiations  = clipboard_set | clipboard_read | file_upload | file_dwnload | server_cmd,
-
-      _action          = _operation << 8,  // Action permission group
-      list             = _action << 0,     // Allow list apps
-      view             = _action << 1,     // Allow view streams
-      launch           = _action << 2,     // Allow launch apps
-      _allow_view      = view | launch,    // Launch contains view permission
-      _all_actions     = list | view | launch,
-
-      _default         = view | list,      // Default permissions for new clients
-      _no              = 0,                // No permissions are granted
-      _all             = _all_inputs | _all_opeiations | _all_actions, // All current permissions
-    };
-  */
-
+   * Permissions mapping
+   */
   const permissionMapping = {
-    // Input permission group
+    _reserved:        0x00000001,
+    _input:           0x00000100,
     input_controller: 0x00000100,
-    input_touch: 0x00000200,
-    input_pen: 0x00000400,
-    input_mouse: 0x00000800,
-    input_kbd: 0x00001000,
-    _all_inputs: 0x00001F00,
+    input_touch:      0x00000200,
+    input_pen:        0x00000400,
+    input_mouse:      0x00000800,
+    input_kbd:        0x00001000,
+    _all_inputs:      0x00001F00,
 
-    // Operation permission group
-    clipboard_set: 0x00010000,
-    clipboard_read: 0x00020000,
-    file_upload: 0x00040000,
-    file_dwnload: 0x00080000,
-    server_cmd: 0x00100000,
-    _all_operations: 0x001F0000,
+    _operation:       0x00010000,
+    clipboard_set:    0x00010000,
+    clipboard_read:   0x00020000,
+    file_upload:      0x00040000,
+    file_dwnload:     0x00080000,
+    server_cmd:       0x00100000,
+    _all_operations:  0x001F0000,
 
-    // Action permission group
-    list: 0x01000000,
-    view: 0x02000000,
-    launch: 0x04000000,
-    _allow_view: 0x06000000,
-    _all_actions: 0x07000000,
+    _action:          0x01000000,
+    list:             0x01000000,
+    view:             0x02000000,
+    launch:           0x04000000,
+    _allow_view:      0x06000000,
+    _all_actions:     0x07000000,
 
-    // Special permissions
-    _default: 0x03000000,
-    _no: 0x00000000,
-    _all: 0x071F1F00
-  };
+    _default:         0x03000000,
+    _no:              0x00000000,
+    _all:             0x071F1F00,
+  }
 
   const permissionGroups = [
-    { name: 'Action', permissions: [
-      {
-        name: 'list',
-        suppressed_by: ['view', 'launch']
-      }, {
-        name: 'view',
-        suppressed_by: ['launch']
-      }, {
-        name: 'launch',
-        suppressed_by: []
-      }
-    ] },
-    { name: 'Operation', permissions: [
-      {
-        name: 'clipboard_set',
-        suppressed_by: []
-      },
-      {
-        name: 'clipboard_read',
-        suppressed_by: []
-      },
-      {
-        name: 'server_cmd',
-        suppressed_by: []
-      }
-    ] },
-    { name: 'Input', permissions: [
-      {
-        name: 'input_controller',
-        suppressed_by: []
-      }, {
-        name: 'input_touch',
-        suppressed_by: []
-      }, {
-        name: 'input_pen',
-        suppressed_by: []
-      }, {
-        name: 'input_mouse',
-        suppressed_by: []
-      }, {
-        name: 'input_kbd',
-        suppressed_by: []
-      }
-    ] },
-  ];
+    {
+      name: 'Input',
+      permissions: [
+        { name: 'input_controller', suppressed_by: [] },
+        { name: 'input_touch',      suppressed_by: [] },
+        { name: 'input_pen',        suppressed_by: [] },
+        { name: 'input_mouse',      suppressed_by: [] },
+        { name: 'input_kbd',        suppressed_by: [] },
+      ]
+    },
+    {
+      name: 'Operation',
+      permissions: [
+        { name: 'clipboard_set',  suppressed_by: [] },
+        { name: 'clipboard_read', suppressed_by: [] },
+        { name: 'file_upload',    suppressed_by: [] },
+        { name: 'file_dwnload',   suppressed_by: [] },
+        { name: 'server_cmd',     suppressed_by: [] },
+      ]
+    },
+    {
+      name: 'Action',
+      permissions: [
+        { name: 'list',   suppressed_by: [] },
+        { name: 'view',   suppressed_by: ['launch'] },
+        { name: 'launch', suppressed_by: [] },
+      ]
+    }
+  ]
 
   let currentEditingClient = null;
 
   const data = () => {
     return {
+      currentTab: location.hash,
       platform: '',
       editingHost: false,
-      currentTab: location.hash || '#OTP',
       otp: '',
       passphrase: '',
       otpMessage: '',
@@ -430,54 +660,45 @@
         })
           .then((response) => response.json())
           .then((response) => {
-            if (response.status === true) {
-              document.querySelector(
-                "#status"
-              ).innerHTML = `<div class="alert alert-success" role="alert">${this.i18n.t('pin.pair_success')}</div>`;
-              document.querySelector("#pin-input").value = "";
-              document.querySelector("#name-input").value = "";
-
-              setTimeout(() => this.refreshClients(), 1000);
-
-              alert(this.i18n.t('pin.pair_success_check_perm'));
+            let status = document.querySelector("#status");
+            if (response.status) {
+              status.classList.remove("alert-danger");
+              status.classList.add("alert", "alert-success");
+              status.innerHTML = this.i18n.t('pin.pair_success');
             } else {
-              document.querySelector(
-                "#status"
-              ).innerHTML = `<div class="alert alert-danger" role="alert">${this.i18n.t('pin.pair_failure')}</div>`;
+              status.classList.remove("alert-success");
+              status.classList.add("alert", "alert-danger");
+              status.innerHTML = this.i18n.t('pin.pair_failure');
             }
+          })
+          .finally(() => {
+            this.refreshClients();
           });
       },
       requestOTP() {
-        if (this.editingHost) return;
-
-        fetch("./api/otp", {
+        let name = this.deviceName;
+        let b = JSON.stringify({name: name});
+        fetch("./api/pin/otp", {
           credentials: 'include',
           headers: {
             'Content-Type': 'application/json'
           },
           method: 'POST',
-          body: JSON.stringify({ passphrase: this.passphrase, deviceName: this.deviceName })
+          body: b
         })
-        .then(resp => resp.json())
-        .then(resp => {
-          if (!resp.status) {
-            this.otpMessage = resp.message
-            this.otpStatus = 'danger'
-            return
-          }
+        .then((response) => response.json())
+        .then((response) => {
+          this.otp = response.otp;
+          this.passphrase = response.passphrase;
+          this.hostPort = response.port;
+          this.hostName = response.name;
 
-          this.otp = resp.otp
-          this.hostName = resp.name
-          this.otpStatus = 'success'
-          this.otpMessage = this.i18n.t('pin.otp_success')
+          if (!hostManuallySet) {
+            const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
 
-          const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
-
-          if (hostManuallySet) {
-            Object.assign(this, hostInfoCache);
-          } else {
-            this.hostAddr = resp.ip
-            this.hostPort = parseInt(location.port, 10) - 1
+            if (response.host_addresses && response.host_addresses.length) {
+              this.hostAddr = response.host_addresses[0];
+            }
 
             if (!isLocalHost) {
               this.hostAddr = location.hostname
@@ -498,6 +719,7 @@
               resetOTPTimeout = null
             }, 3 * 60 * 1000)
 
+            const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
             if (!isLocalHost) {
               setTimeout(() => {
                 if (window.confirm(this.i18n.t('pin.otp_pair_now'))) {
@@ -536,8 +758,6 @@
         client.edit_do = JSON.parse(JSON.stringify(client.do || []));
         client.edit_undo = JSON.parse(JSON.stringify(client.undo || []));
         currentEditingClient = client;
-
-        console.log(client.do, client.undo)
       },
       cancelEdit(client) {
         currentEditingClient = null;
@@ -653,20 +873,21 @@
       },
       unpairAll() {
         this.unpairAllPressed = true;
+        this.unpairAllStatus = null;
         fetch("./api/clients/unpair-all", {
           credentials: 'include',
-          method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
+          method: 'POST'
         })
-          .then((r) => r.json())
-          .then((r) => {
+          .then((response) => response.json())
+          .then((response) => {
+            this.unpairAllStatus = !!response.status;
+          })
+          .finally(() => {
             this.unpairAllPressed = false;
-            this.unpairAllStatus = r.status;
-            setTimeout(() => {
-              this.unpairAllStatus = null;
-            }, 5000);
+            this.showApplyMessage = true;
             this.refreshClients();
           });
       },
@@ -719,18 +940,15 @@
                   always_use_virtual_display
                 }
               })
-              currentEditingClient = null;
             } else {
-              this.clients = [];
+              this.clients = []
             }
-          })
-          .catch(e => {
-            console.error(e)
-            location.reload();
           });
-      },
+      }
     }
   });
 
   initApp(app);
 </script>
+
+</html>
