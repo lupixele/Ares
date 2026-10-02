@@ -1,209 +1,158 @@
-# Apollo
+# Ares
 
-Apollo is a self-hosted desktop stream host for [Artemis(Moonlight Noir)](https://github.com/ClassicOldSong/moonlight-android). Offering low latency, native client resolution, cloud gaming server capabilities with support for AMD, Intel, and Nvidia GPUs for hardware encoding. Software encoding is also available. A web UI is provided to allow configuration and client pairing from your favorite web browser. Pair from the local server or any mobile device.
+Ares is an open-source, self-hosted desktop streaming server designed to pair with [Athena](https://github.com/lupixele/Athena) (and compatible Moonlight / Artemis clients). Offering low latency, native client resolution matching, and cloud gaming server capabilities, Ares supports AMD, Intel, and Nvidia hardware encoding alongside software encoding fallback. A modernized web interface is provided for configuration and secure client pairing.
 
-Major features:
+* Repository: [https://github.com/lupixele/Ares](https://github.com/lupixele/Ares)
+* Paired Android Client: [Athena](https://github.com/lupixele/Athena)
 
-- [x] Built-in Virtual Display with HDR support that matches the resolution/framerate config of your client automatically
-- [x] Permission management for clients
-- [x] Clipboard sync
-- [x] Commands for client connection/disconnection (checkout [Auto pause/resume games](https://github.com/ClassicOldSong/Apollo/wiki/Auto-pause-resume-games))
-- [x] Input only mode
-
-## Usage
-
-Refer to LizardByte's documentation hosted on [Read the Docs](https://docs.lizardbyte.dev/projects/sunshine) for now.
-
-Currently Virtual Display support is Windows only, Linux support is planned and will be implemented in the future.
-
-## About Permission System
-
-Check out the [Wiki](https://github.com/ClassicOldSong/Apollo/wiki/Permission-System)
+---
 
 > [!NOTE]
-> The **FIRST** client paired with Apollo will be granted with FULL permissions, then other newly paired clients will only be granted with `View Streams` and `List Apps` permission. If you encounter `Permission Denied` error when trying to launch any app, go check the permission for that device and grant `Launch Apps` permission. The same applies to the situation when you find that you can't move mouse or type with keyboard on newly paired clients, grant the corresponding client `Mouse Input` and `Keyboard Input` permissions.
+> ### Project Status: Work in Progress (WIP)
+> * **Apollo Baseline & Sunshine Migration:** Ares is currently based on an **Apollo baseline** host, with a migration to current upstream **Sunshine** actively in progress.
+> * **Interface Modernization:** Ongoing host web interface overhaul and modernization.
+> * **Virtual Display & Touch Keyboard:** Integration of Windows touch keyboard docking safeguards and single-display topology fixes (derived from `vda-touch-fix` research) is in active development. Host virtual-display driver assets and automated signing/distribution paths are incomplete and **not yet production-ready**.
+> * **No Prebuilt Binaries:** There are currently **no prebuilt binaries, installers, WinGet packages, or official Ares releases**. Do not download third-party binaries expecting a tested Ares release. Ares must currently be built from source.
 
-## About Virtual Display
+---
+
+## Major Features
+
+- [x] **Built-in Virtual Display**: Automatic resolution and framerate matching with your streaming client via SudoVDA (Windows).
+- [x] **Client Permission Management**: Fine-grained access control (streaming, input control, app execution) per client device.
+- [x] **Touch Keyboard Docking Integration (In Progress)**: Integrated virtual display handling to keep the Windows touch keyboard docked on high-resolution virtual displays without manual script patching.
+- [x] **Clipboard Synchronization**: Seamless clipboard sharing between host and client.
+- [x] **Automated Connection Triggers**: Run custom scripts on client connect and disconnect (see [Auto pause/resume games](https://github.com/ClassicOldSong/Apollo/wiki/Auto-pause-resume-games)).
+- [x] **Input-Only Mode**: Control the host without capturing or streaming display video.
+- [x] **Seamless Dual-GPU Laptop Support**: Stream directly from dedicated GPUs in headless environments without physical dummy plugs.
+- [x] **Modernized Web Management**: Browser-based configuration, client management, and pairing workflow.
+
+---
+
+## Client Pairing & Documentation
+
+* **Paired Client:** Recommended client is [Athena](https://github.com/lupixele/Athena) (Android) or [Artemis](https://github.com/ClassicOldSong/moonlight-android) / [Moonlight](https://moonlight-stream.org/) clients across other platforms.
+* **Core Documentation:** For general Sunshine configuration parameters, refer to LizardByte's [Sunshine Documentation](https://docs.lizardbyte.dev/projects/sunshine).
+* **Apollo Technical Reference:** For specific features inherited from Apollo, refer to the [Apollo Wiki](https://github.com/ClassicOldSong/Apollo/wiki).
+
+---
+
+## Permission System
+
+For an in-depth overview, see the [Permission System Guide](https://github.com/ClassicOldSong/Apollo/wiki/Permission-System).
+
+> [!NOTE]
+> The **FIRST** client paired with Ares is granted FULL permissions. Subsequent newly paired clients are granted only `View Streams` and `List Apps` permissions by default. If a newly paired client cannot launch apps, grant `Launch Apps` in the client permissions panel. If mouse or keyboard input is unresponsive, verify that `Mouse Input` and `Keyboard Input` permissions are enabled for that client.
+
+---
+
+## Virtual Display (Windows)
 
 > [!WARNING]
-> ***It is highly recommend to remove any other virtual display solutions from your system and Apollo/Sunshine config, to reduce confusions and compatibility issues.***
+> ***It is highly recommended to remove any other virtual display solutions from your system and host configuration to avoid device enumeration conflicts.***
 
 > [!NOTE]
-> **TL;DR** Just treat your Artemis/Moonlight client like a dedicated PnP monitor with Apollo.
+> **Concept:** Ares treats your streaming client like a dedicated plug-and-play monitor.
 
-Apollo uses SudoVDA for virtual display. It features auto resolution and framerate matching for your Artemis/Moonlight clients. The virtual display is created upon the stream starts and removed once the app quits. **If you do not see a new virtual display added or removed when the stream starts or stops, there may be a driver misconfiguration, or another persistent virtual display might still be active.**
+Ares leverages SudoVDA for virtual display handling on Windows:
+* **Dynamic Resolution & Refresh Rate Matching:** The virtual display is created automatically upon stream start matching client specifications, and removed when the session terminates.
+* **Persistent Display Identity:** Ares assigns a persistent display identifier to each paired client, allowing Windows to remember layout, scale factor, and color profiles natively across sessions.
+* **Touch Keyboard & Lifecycle Fixes:** Display lifecycle handling and virtual display touch keyboard docking optimizations are being integrated into Ares host drivers. Driver distribution packaging remains under development.
 
-The virtual display works just like any physically attached monitors with SudoVDA, there's completely no need for a super complicated solution to "fix" resolution configurations for your devices. Unlike all other solutions that reuses one identity or generate a random one each time for any virtual display sessions, **Apollo assigns a fixed identity for each Artemis/Moonlight client, so your display configuration will be automatically remembered and managed by Windows natively.**
+### Dual-GPU Laptops
 
-## Configuration for dual GPU laptops
+Ares supports dual-GPU systems seamlessly:
+1. Set the **Adapter Name** to your discrete GPU (dGPU) in configuration.
+2. Enable **Headless mode** in the **Audio/Video** tab.
+3. Save and restart.
 
-Apollo supports dual GPUs seamlessly.
+No physical dummy plug is required; the desktop will be rendered and encoded directly from your dGPU.
 
-If you want to use your dGPU, just set the `Adapter Name` to your dGPU and enable `Headless mode` in `Audio/Video` tab, save and restart your computer. No dummy plug is needed any more, the image will be rendered and encoded directly from your dGPU.
+---
 
-## About HDR
+## HDR Support
 
-HDR starts supporting from Windows 11 23H2 and generally supported on 24H2. Some systems might not have HDR toggle on 23H2 and you just need to upgrade to 24H2. Any system lower than 23H2/Windows 10 will not have HDR option available.
+HDR streaming requires Windows 11 (23H2 or 24H2). Windows 10 and earlier versions do not provide the necessary OS-level HDR display pipeline.
 
 > [!NOTE]
-> The below section is written for professional media workers. It doesn't stop you from enabling HDR if you know what you're doing and have deep understanding about how HDR works.
->
-> Apollo and SudoVDA can handle HDR just fine like any other streaming solutions.
->
-> If you have had good experience with HDR previously, you can safely ignore this section.
->
-> If you're curious, read on, but don't blame Apollo for poor HDR support.
-
-Whether HDR streaming looks good, it depends completely on your client.
-
-In short, ICC color correction should be totally useless while streaming HDR. It's your client's job to get HDR content displayed right, not the host. But in fact, it does affect the captured video stream and reflect changes on devices that can handle HDR correctly. On other devices that can't, the info is not respected at all.
-
-It's very complicated to explain why HDR is a total mess, and why enabling HDR makes the image appear dark/yellow. If it's your first time got HDR streaming working, and thinks HDR looks awful, you're right, but that's not Apollo's fault, it's your device that tone mapped SDR content to the maximum of the capability of its screen, there's no headroom for anything beyond that actual peak brightness for HDR. For details, please take a look [here](https://github.com/ClassicOldSong/Apollo/issues/164).
-
-For client devices, usually Apple products that have HDR capability can be trusted to have good results, other than that, your luck depends.
+> HDR visual fidelity depends entirely on your client device's tone-mapping capabilities and screen dynamic range. If enabling HDR causes washed-out or dim visuals, verify your client display tone-mapping configuration.
 
 <details>
-<summary>DEPRECATION ALERT</summary>
+<summary>HDR Color Space Notice</summary>
 
-Enabling HDR is **generally not recommended** with **ANY streaming solutions** at this moment, probably in the long term. The issue with **HDR itself** is huge, with loads of semi-incompatible standards, and massive variance between device configurations and capabilities. Game support for HDR is still choppy.
-
-SDR actually provides much more stable color accuracy, and are widely supported throughout most devices you can imagine. For games, art style can easily overcome the shortcoming with no HDR, and SDR has pretty standard workflows to ensure their visual performance. So HDR isn't *that* important in most of the cases.
+Enabling HDR is generally not recommended if your primary workflow requires color-accurate SDR reproduction across non-calibrated displays. Windows Auto HDR will not trigger automatically on virtual displays unless running in native HDR mode.
 
 </details>
 
-## How to run multiple instances of Apollo for multiple virtual displays
-
-Follow the instructions in the [Wiki](https://github.com/ClassicOldSong/Apollo/wiki/How-to-start-multiple-instances-of-Apollo).
-
-## FAQ
-Moved to [WiKi](https://github.com/ClassicOldSong/Apollo/wiki/FAQ)
-
-## Stuttering Clinic
-Here're some common causes and solutions for stutters: [WiKi](https://github.com/ClassicOldSong/Apollo/wiki/Stuttering-Clinic).
-
-## Device specific setups
-- Pixel devices might not be able to use native resolution:
-  - Change the device resolution to Max: https://github.com/ClassicOldSong/Apollo/issues/700
+---
 
 ## System Requirements
 
-> **Warning**: This table is a work in progress. Do not purchase hardware based on this.
+> [!NOTE]
+> Requirements inherited from upstream Sunshine and Apollo baselines.
 
-**Minimum Requirements**
+### Minimum Requirements
 
-| **Component** | **Description** |
-|---------------|-----------------|
-| GPU           | AMD: VCE 1.0 or higher, see: [obs-amd hardware support](https://github.com/obsproject/obs-amd-encoder/wiki/Hardware-Support) |
-|               | Intel: VAAPI-compatible, see: [VAAPI hardware support](https://www.intel.com/content/www/us/en/developer/articles/technical/linuxmedia-vaapi.html) |
-|               | Nvidia: NVENC enabled cards, see: [nvenc support matrix](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new) |
-| CPU           | AMD: Ryzen 3 or higher |
-|               | Intel: Core i3 or higher |
-| RAM           | 4GB or more |
-| OS            | Windows: 10+ (Windows Server requires [manual installation](https://github.com/nefarius/ViGEmBus/issues/153) for gamepad support) |
-|               | macOS: 12+ |
-|               | Linux/Debian: 11 (bullseye) |
-|               | Linux/Fedora: 39+ |
-|               | Linux/Ubuntu: 22.04+ (jammy) |
-| Network       | Host: 5GHz, 802.11ac |
-|               | Client: 5GHz, 802.11ac |
+| Component | Description |
+|---|---|
+| **GPU** | **AMD:** VCE 1.0 or higher ([obs-amd support](https://github.com/obsproject/obs-amd-encoder/wiki/Hardware-Support))<br>**Intel:** Quick Sync / VAAPI-compatible ([VAAPI support](https://www.intel.com/content/www/us/en/developer/articles/technical/linuxmedia-vaapi.html))<br>**Nvidia:** NVENC-enabled cards ([NVENC matrix](https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new)) |
+| **CPU** | AMD Ryzen 3 or higher / Intel Core i3 or higher |
+| **RAM** | 4 GB or more |
+| **OS** | Windows 10+ (Windows 11 23H2+ required for Virtual Display HDR) |
+| **Network** | 5 GHz 802.11ac Wi-Fi or Ethernet |
 
-**4k Suggestions**
+---
 
-| **Component** | **Description** |
-|---------------|-----------------|
-| GPU           | AMD: Video Coding Engine 3.1 or higher |
-|               | Intel: HD Graphics 510 or higher |
-|               | Nvidia: GeForce GTX 1080 or higher |
-| CPU           | AMD: Ryzen 5 or higher |
-|               | Intel: Core i5 or higher |
-| Network       | Host: CAT5e ethernet or better |
-|               | Client: CAT5e ethernet or better |
+## Building from Source
 
-**HDR Suggestions**
+Because official prebuilt Ares packages are not yet published, build from source using the following workflow:
 
-| **Component** | **Description** |
-|---------------|-----------------|
-| GPU           | AMD: Video Coding Engine 3.4 or higher |
-|               | Intel: UHD Graphics 730 or higher |
-|               | Nvidia: Pascal-based GPU (GTX 10-series) or higher |
-| CPU           | AMD: todo |
-|               | Intel: todo |
-| Network       | Host: CAT5e ethernet or better |
-|               | Client: CAT5e ethernet or better |
+### Prerequisites
 
-## Integrations
+* Visual Studio 2022 (MSVC with Desktop C++ workload)
+* CMake 3.24 or higher
+* Git (with submodule support)
+* Node.js (LTS version, for web assets)
 
-SudoVDA: Virtual Display Adapter Driver used in Apollo
+### Build Steps (Windows)
 
-[Artemis](https://github.com/ClassicOldSong/moonlight-android): Integrated Virtual Display options control from client side
+```powershell
+# 1. Clone repository with all submodules
+git clone --recurse-submodules https://github.com/lupixele/Ares.git
+cd Ares
 
-**NOTE**: Artemis currently supports Android only. Other platforms will come later.
+# 2. Build modernized Web UI assets
+cd src/web
+npm install
+npm run build
+cd ../..
 
-## Support
-
-Currently support is only provided via GitHub Issues/Discussions.
-
-No real time chat support will ever be provided for Apollo and Artemis. Including but not limited to:
-
-- Discord
-- Telegram
-- Whatsapp
-- QQ
-- WeChat 
-
-> When there's a chat, there're dramas. -- Confucius
-
-## Downloads
-
-### Direct Download
-
-**Recommended**
-
-[Releases](https://github.com/ClassicOldSong/Apollo/releases)
-
-### WinGet
-
-**Note:** Community maintained
-
-In an elevated PowerShell window, run
-
-```pwsh
-winget install ClassicOldSong.Apollo
-
+# 3. Configure and compile Ares
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-You'll need WinGet installed first.
+---
 
-### Chocolatey
+## Legacy Branding & Assets Note
 
-**Note:** Community maintained
+Any remaining Apollo logos or screenshot assets in documentation and packaging are retained temporarily pending updated Ares identity assets.
 
-You can also install the apollo streaming server with chocolatey.
+---
 
-Install Chocolatey if you don't have it, then run the following command in an elevated PowerShell/CMD window:
+## Lineage & Attribution
 
-```pwsh
-choco upgrade apollo -y 
-```
+Ares is built upon the open-source streaming ecosystem:
 
-Same command can be used to upgrade, add to a scheduled task to automate updates.
+* **[Apollo](https://github.com/ClassicOldSong/Apollo):** The immediate baseline architecture for virtual displays, client permission controls, and desktop host enhancements developed by ClassicOldSong and contributors.
+* **[Sunshine](https://github.com/LizardByte/Sunshine):** The foundational open-source self-hosted streaming server by LizardByte and contributors.
+* **[Moonlight](https://moonlight-stream.org/):** The original open-source client implementation and reverse-engineered protocol.
+* **[vda-touch-fix](https://github.com/ClassicOldSong):** Upstream analysis and patching for Windows virtual display touch keyboard docking and display topology persistence.
 
-See more details on the chocolatey package [here](https://community.chocolatey.org/packages/apollo)
+All original upstream licenses, copyrights, and contributions are preserved and gratefully acknowledged.
 
-## Disclaimer
-
-I got kicked from Moonlight and Sunshine's Discord server and banned from Sunshine's GitHub repo literally for helping people out.
-
-This is what I got for finding a bug, opened an issue, getting no response, troubleshoot myself, fixed the issue myself, shared it by PR to the main repo hoping my efforts can help someone else during the maintenance gap.
-
-Yes, I'm going away. [Apollo](https://github.com/ClassicOldSong/Apollo) and [Artemis(Moonlight Noir)](https://github.com/ClassicOldSong/moonlight-android) will no longer be compatible with OG Sunshine and OG Moonlight eventually, but they'll work even better with much more carefully designed features.
-
-The Moonlight repo had stayed silent for 5 months, with nobody actually responding to issues, and people are getting totally no help besides the limited FAQ in their Discord server. I tried to answer issues and questions, solve problems within my ability but I got kicked out just for helping others.
-
-**PRs for feature improvements are welcomed here unlike the main repo, your ideas are more likely to be appreciated and your efforts are actually being respected. We welcome people who can and willing to share their efforts, helping yourselves and other people in need.**
-
-**Update**: They have contacted me and apologized for this incident, but the fact it **happened** still motivated me to start my own fork.
+---
 
 ## License
 
-GPLv3
+Ares is free and open-source software licensed under the **GNU General Public License v3.0** ([GPLv3](LICENSE)).
