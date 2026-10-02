@@ -9,12 +9,14 @@
 
   <!-- Sidebar -->
   <aside
+    ref="sidebarEl"
     class="ares-sidebar"
     :class="{
       'ares-sidebar--collapsed': collapsed,
       'ares-sidebar--mobile-open': mobileOpen,
     }"
     :aria-label="$t('navbar.navigation')"
+    :inert="isMobile && !mobileOpen ? true : undefined"
   >
     <!-- Logo / brand row -->
     <div class="ares-sidebar__header">
@@ -51,6 +53,12 @@
     <nav class="ares-sidebar__nav" aria-label="Main navigation">
       <ul class="ares-sidebar__section">
         <li v-for="item in navItems" :key="item.href" class="ares-sidebar__item-wrapper">
+          <!-- Active bar is on the wrapper to escape the anchor's overflow:hidden -->
+          <span
+            class="ares-sidebar__active-bar"
+            :class="{ 'ares-sidebar__active-bar--visible': isActive(item) }"
+            aria-hidden="true"
+          />
           <a
             :href="item.href"
             class="ares-sidebar__item"
@@ -58,9 +66,6 @@
             :aria-current="isActive(item) ? 'page' : undefined"
             :title="collapsed ? $t(item.labelKey) : undefined"
           >
-            <!-- Active indicator bar -->
-            <span class="ares-sidebar__active-bar" aria-hidden="true" />
-
             <!-- Icon -->
             <span class="ares-sidebar__icon" aria-hidden="true" v-html="item.icon" />
 
@@ -107,17 +112,32 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import ThemeToggle from './ThemeToggle.vue'
 
-// Persist collapse state across page loads
+// ── localStorage helpers — resilient to private-browsing SecurityError ──
+function lsGet(key) {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem(key, val) } catch { /* storage unavailable */ }
+}
+
+// ── Collapse state ──
 const COLLAPSE_KEY = 'ares-sidebar-collapsed'
-const storedCollapsed = localStorage.getItem(COLLAPSE_KEY)
-const collapsed = ref(storedCollapsed === 'true')
+const collapsed = ref(lsGet(COLLAPSE_KEY) === 'true')
 const mobileOpen = ref(false)
+const isMobile = ref(false)
+const sidebarEl = ref(null)
+let _lastFocusBeforeOpen = null
+
+// Track viewport for mobile guards
+function updateMobile() {
+  isMobile.value = window.matchMedia('(max-width: 768px)').matches
+}
 
 watch(collapsed, (val) => {
-  localStorage.setItem(COLLAPSE_KEY, String(val))
+  lsSet(COLLAPSE_KEY, String(val))
   document.documentElement.classList.toggle('ares-sidebar-expanded', !val)
 })
 
@@ -125,6 +145,60 @@ watch(collapsed, (val) => {
 if (!collapsed.value) {
   document.documentElement.classList.add('ares-sidebar-expanded')
 }
+
+// ── Mobile focus trap & Escape ──
+watch(mobileOpen, (open) => {
+  if (open) {
+    _lastFocusBeforeOpen = document.activeElement
+    // Focus first focusable element inside sidebar on next tick
+    requestAnimationFrame(() => {
+      const el = sidebarEl.value
+      if (!el) return
+      const focusable = el.querySelectorAll(
+        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+      if (focusable.length) focusable[0].focus()
+    })
+  } else {
+    // Return focus to the trigger that opened the sheet
+    if (_lastFocusBeforeOpen && typeof _lastFocusBeforeOpen.focus === 'function') {
+      _lastFocusBeforeOpen.focus()
+    }
+    _lastFocusBeforeOpen = null
+  }
+})
+
+function onKeyDown(e) {
+  if (e.key === 'Escape' && mobileOpen.value) {
+    mobileOpen.value = false
+  }
+  // Trap Tab within sidebar when mobile sheet is open
+  if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value) {
+    const el = sidebarEl.value
+    const focusable = Array.from(
+      el.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
+    )
+    if (!focusable.length) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (e.shiftKey) {
+      if (document.activeElement === first) { e.preventDefault(); last.focus() }
+    } else {
+      if (document.activeElement === last) { e.preventDefault(); first.focus() }
+    }
+  }
+}
+
+onMounted(() => {
+  updateMobile()
+  window.addEventListener('resize', updateMobile, { passive: true })
+  document.addEventListener('keydown', onKeyDown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateMobile)
+  document.removeEventListener('keydown', onKeyDown)
+})
 
 const currentPath = computed(() => {
   // Resolve current page from location
@@ -200,6 +274,17 @@ const navItems = [
     --ares-sidebar-active-bg: rgba(109, 136, 248, 0.12);
     --ares-sidebar-hover-bg:  rgba(255, 255, 255, 0.04);
   }
+}
+
+/* Explicit light theme — beats OS dark media query when user picks Light in UI */
+:global([data-bs-theme=light]) .ares-sidebar {
+  --ares-sidebar-bg:        #f8f9fa;
+  --ares-sidebar-border:    #e3e6ea;
+  --ares-sidebar-text:      #374151;
+  --ares-sidebar-text-mute: #6b7280;
+  --ares-sidebar-accent:    #4f6ef7;
+  --ares-sidebar-active-bg: rgba(79, 110, 247, 0.08);
+  --ares-sidebar-hover-bg:  rgba(0, 0, 0, 0.04);
 }
 
 /* Sidebar shell */
@@ -349,10 +434,10 @@ const navItems = [
   color: var(--ares-sidebar-accent);
 }
 
-/* Animated active indicator bar on left edge */
+/* Animated active indicator bar — on the item-wrapper (not inside the overflow:hidden anchor) */
 .ares-sidebar__active-bar {
   position: absolute;
-  left: -8px;
+  left: 0;
   top: 50%;
   transform: translateY(-50%) scaleY(0);
   width: 3px;
@@ -360,9 +445,10 @@ const navItems = [
   border-radius: 0 3px 3px 0;
   background: var(--ares-sidebar-accent);
   transition: transform var(--ares-sidebar-transition);
+  pointer-events: none;
 }
 
-.ares-sidebar__item--active .ares-sidebar__active-bar {
+.ares-sidebar__active-bar--visible {
   transform: translateY(-50%) scaleY(1);
 }
 
@@ -449,5 +535,24 @@ const navItems = [
   z-index: 1025;
   background: rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(2px);
+}
+
+/* ── Collapse button hidden on mobile (rail/expand doesn't apply) ── */
+@media (max-width: 768px) {
+  .ares-sidebar__collapse-btn {
+    display: none;
+  }
+}
+
+/* ── Reduced motion: snap all sidebar transitions to instant ── */
+@media (prefers-reduced-motion: reduce) {
+  .ares-sidebar,
+  .ares-sidebar__active-bar,
+  .ares-sidebar__brand-name,
+  .ares-sidebar__chevron,
+  .ares-sidebar__item,
+  .ares-sidebar__label {
+    transition: none !important;
+  }
 }
 </style>

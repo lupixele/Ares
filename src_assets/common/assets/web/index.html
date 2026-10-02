@@ -3,74 +3,165 @@
 
 <head>
   <%- header %>
+  <style>
+    .ares-overview__header { border-bottom: 1px solid var(--bs-border-color); padding-bottom: 1rem; }
+    .ares-overview__title { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .ares-overview__desc { font-size: 0.95rem; }
+
+    .ares-stat-card { border-radius: 12px; }
+    .ares-stat-card .card-body { padding: 1.25rem 1.5rem; }
+    .ares-stat-card__label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--bs-secondary-color);
+      margin-bottom: 0.35rem;
+    }
+    .ares-stat-card__value {
+      font-size: 1.6rem;
+      font-weight: 700;
+      line-height: 1.15;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 0.4rem;
+    }
+    .ares-stat-card__value--unavailable {
+      color: var(--bs-secondary-color);
+    }
+    .ares-stat-card__sub { font-size: 0.8rem; }
+  </style>
 </head>
 
 <body id="app" v-cloak>
   <AresSidebar></AresSidebar>
   <div id="content" class="ares-page-body container">
-    <h1 class="my-4">{{ $t('index.welcome') }}</h1>
-    <p>{{ $t('index.description') }}</p>
-    <div class="alert alert-danger" v-if="fancyLogs.find(x => x.level === 'Fatal')">
-      <div style="line-height: 32px;">
-        <i class="fas fa-circle-exclamation" style="font-size: 32px;margin-right: 0.25em;"></i>
-        <p v-html="$t('index.startup_errors')"></p>
-        <br>
-      </div>
-      <ul>
-        <li v-for="v in fancyLogs.filter(x => x.level === 'Fatal')">{{v.value}}</li>
-      </ul>
-      <a class="btn btn-danger" href="./troubleshooting#logs">View Logs</a>
+
+    <!-- Page header -->
+    <div class="ares-overview__header my-4">
+      <h1 class="ares-overview__title">{{ $t('index.welcome') }}</h1>
+      <p class="ares-overview__desc text-muted mb-0">{{ $t('index.description') }}</p>
     </div>
-    <!-- Version -->
-    <div class="card p-2 my-4">
-      <div class="card-body" v-if="version">
-        <h2>Version {{version.version}}</h2>
-        <br>
-        <div v-if="loading">
-          {{ $t('index.loading_latest') }}
-        </div>
-        <div class="alert alert-success" v-if="buildVersionIsDirty">
-          {{ $t('index.version_dirty') }} 🌇
-        </div>
-        <div class="alert alert-info" v-if="installedVersionNotStable">
-          {{ $t('index.installed_version_not_stable') }}
-        </div>
-        <div v-else-if="(!preReleaseBuildAvailable || !notifyPreReleases) && !stableBuildAvailable && !buildVersionIsDirty">
-          <div class="alert alert-success">
-            {{ $t('index.version_latest') }}
-          </div>
-        </div>
-        <div v-if="notifyPreReleases && preReleaseBuildAvailable">
-          <div class="alert alert-warning">
-            <div class="d-flex justify-content-between">
-              <div class="my-2">
-                <p>{{ $t('index.new_pre_release') }}</p>
-              </div>
-              <a class="btn btn-success m-1" :href="preReleaseVersion.release.html_url" target="_blank">{{ $t('index.download') }}</a>
+
+    <!-- Fatal startup errors banner -->
+    <div class="alert alert-danger d-flex gap-3 align-items-start my-4" v-if="fancyLogs.find(x => x.level === 'Fatal')">
+      <i class="fas fa-circle-exclamation flex-shrink-0" style="font-size: 24px; margin-top: 2px;"></i>
+      <div class="flex-grow-1">
+        <p class="mb-1 fw-semibold" v-html="$t('index.startup_errors')"></p>
+        <ul class="mb-2">
+          <li v-for="v in fancyLogs.filter(x => x.level === 'Fatal')">{{v.value}}</li>
+        </ul>
+        <a class="btn btn-sm btn-danger" href="./troubleshooting#logs">
+          <i class="fas fa-fw fa-list-ul"></i> View Logs
+        </a>
+      </div>
+    </div>
+
+    <!-- Status row: version card + info cards -->
+    <div class="row g-3 mb-4" v-if="version">
+
+      <!-- Version card -->
+      <div class="col-12 col-md-6 col-lg-4">
+        <div class="card h-100 ares-stat-card">
+          <div class="card-body">
+            <div class="ares-stat-card__label">
+              <i class="fas fa-fw fa-code-branch me-1" aria-hidden="true"></i>
+              {{ $t('index.stat_version') }}
             </div>
-            <pre><b>{{preReleaseVersion.release.name}}</b></pre>
-            <pre>{{preReleaseVersion.release.body}}</pre>
-          </div>
-        </div>
-        <div v-if="stableBuildAvailable">
-          <div class="alert alert-warning">
-            <div class="d-flex justify-content-between">
-              <div class="my-2">
-                <p>{{ $t('index.new_stable') }}</p>
-              </div>
-              <a class="btn btn-success m-1" :href="githubVersion.release.html_url" target="_blank">{{ $t('index.download') }}</a>
+            <div class="ares-stat-card__value">{{ version.version }}</div>
+            <div class="ares-stat-card__sub">
+              <span v-if="loading" class="text-muted">
+                <i class="fas fa-fw fa-circle-notch fa-spin me-1"></i>
+                {{ $t('index.loading_latest') }}
+              </span>
+              <span v-else-if="buildVersionIsDirty" class="badge bg-success-subtle text-success-emphasis">
+                {{ $t('index.version_dirty') }}
+              </span>
+              <span v-else-if="installedVersionNotStable" class="badge bg-info-subtle text-info-emphasis">
+                Pre-release
+              </span>
+              <span v-else-if="stableBuildAvailable" class="badge bg-warning-subtle text-warning-emphasis">
+                {{ $t('index.update_available') }}
+              </span>
+              <span v-else class="badge bg-success-subtle text-success-emphasis">
+                <i class="fas fa-fw fa-check me-1"></i>{{ $t('index.version_latest_short') }}
+              </span>
             </div>
-            <h3>{{githubVersion.release.name}}</h3>
-            <pre>{{githubVersion.release.body}}</pre>
           </div>
         </div>
       </div>
+
+      <!-- Active sessions — not available from backend API; show honest unavailable state -->
+      <div class="col-12 col-md-6 col-lg-4">
+        <div class="card h-100 ares-stat-card">
+          <div class="card-body">
+            <div class="ares-stat-card__label">
+              <i class="fas fa-fw fa-satellite-dish me-1" aria-hidden="true"></i>
+              {{ $t('index.stat_sessions') }}
+            </div>
+            <div class="ares-stat-card__value ares-stat-card__value--unavailable">—</div>
+            <div class="ares-stat-card__sub text-muted">{{ $t('index.stat_unavailable') }}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stream status — not available from backend API -->
+      <div class="col-12 col-md-6 col-lg-4">
+        <div class="card h-100 ares-stat-card">
+          <div class="card-body">
+            <div class="ares-stat-card__label">
+              <i class="fas fa-fw fa-wifi me-1" aria-hidden="true"></i>
+              {{ $t('index.stat_stream') }}
+            </div>
+            <div class="ares-stat-card__value ares-stat-card__value--unavailable">—</div>
+            <div class="ares-stat-card__sub text-muted">{{ $t('index.stat_unavailable') }}</div>
+          </div>
+        </div>
+      </div>
     </div>
-    <!-- Resources -->
+
+    <!-- Update alerts -->
+    <div v-if="version">
+      <!-- Pre-release available -->
+      <div v-if="notifyPreReleases && preReleaseBuildAvailable" class="alert alert-warning mb-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+          <div>
+            <strong>{{ $t('index.new_pre_release') }}</strong>
+            <pre class="mb-0 mt-1 small">{{preReleaseVersion.release.name}}</pre>
+          </div>
+          <a class="btn btn-sm btn-success flex-shrink-0" :href="preReleaseVersion.release.html_url" target="_blank">
+            <i class="fas fa-fw fa-download me-1"></i>{{ $t('index.download') }}
+          </a>
+        </div>
+        <pre class="mt-2 small text-body-secondary">{{preReleaseVersion.release.body}}</pre>
+      </div>
+
+      <!-- Stable update available -->
+      <div v-if="stableBuildAvailable" class="alert alert-warning mb-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+          <div>
+            <strong>{{ $t('index.new_stable') }}</strong>
+            <div class="mt-1 small">{{githubVersion.release.name}}</div>
+          </div>
+          <a class="btn btn-sm btn-success flex-shrink-0" :href="githubVersion.release.html_url" target="_blank">
+            <i class="fas fa-fw fa-download me-1"></i>{{ $t('index.download') }}
+          </a>
+        </div>
+        <pre class="mt-2 small text-body-secondary">{{githubVersion.release.body}}</pre>
+      </div>
+
+      <!-- Pre-release notification (no new build, but running unstable) -->
+      <div v-if="installedVersionNotStable && !stableBuildAvailable" class="alert alert-info mb-3">
+        <i class="fas fa-fw fa-flask me-1"></i>
+        {{ $t('index.installed_version_not_stable') }}
+      </div>
+    </div>
+
+    <!-- Paired clients & resources -->
     <div class="my-4">
       <Client-Card></Client-Card>
       <Resource-Card></Resource-Card>
     </div>
+
   </div>
 </body>
 
@@ -82,7 +173,7 @@
   import ResourceCard from './ResourceCard.vue'
   import ApolloVersion from './apollo_version'
 
-  console.log("Hello, Apollo!")
+  console.log("Hello, Ares!")
   let app = createApp({
     components: {
       AresSidebar,

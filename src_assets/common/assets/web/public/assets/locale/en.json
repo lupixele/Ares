@@ -1,4 +1,4 @@
-{
+﻿{
   "_common": {
     "apply": "Apply",
     "auto": "Automatic",
@@ -468,16 +468,22 @@
     "save_password": "Remember Password"
   },
   "index": {
-    "description": "Apollo is a self-hosted game stream host for Moonlight.",
+    "description": "Ares is a self-hosted game stream host for Moonlight.",
     "download": "Download",
-    "installed_version_not_stable": "You are running a pre-release version of Apollo. You may experience bugs or other issues. Please report any issues you encounter. Thank you for helping to make Apollo a better software!",
+    "installed_version_not_stable": "You are running a pre-release version of Ares. You may experience bugs or other issues. Please report any issues you encounter. Thank you for helping to make Ares a better software!",
     "loading_latest": "Loading latest release...",
     "new_pre_release": "A new Pre-Release Version is Available!",
     "new_stable": "A new Stable Version is Available!",
-    "startup_errors": "<b>Attention!</b> Apollo detected these errors during startup. We <b>STRONGLY RECOMMEND</b> fixing them before streaming.",
-    "version_dirty": "Thank you for helping to make Apollo a better software!",
-    "version_latest": "You are running the latest version of Apollo",
-    "welcome": "Hello, Apollo!"
+    "startup_errors": "<b>Attention!</b> Ares detected these errors during startup. We <b>STRONGLY RECOMMEND</b> fixing them before streaming.",
+    "stat_sessions": "Active Sessions",
+    "stat_stream": "Stream Status",
+    "stat_unavailable": "Not reported by backend",
+    "stat_version": "Version",
+    "update_available": "Update available",
+    "version_dirty": "Thank you for helping to make Ares a better software!",
+    "version_latest": "You are running the latest version of Ares",
+    "version_latest_short": "Up to date",
+    "welcome": "Hello, Ares!"
   },
   "navbar": {
     "applications": "Applications",
