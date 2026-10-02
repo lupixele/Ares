@@ -2,6 +2,7 @@
  * @file tests/unit/platform/windows/test_session_driver_boundary.cpp
  * @brief Unit tests for the C++ session and virtual display driver boundary.
  */
+#ifdef _WIN32
 #include "tests/tests_common.h"
 #include "src/platform/windows/session_driver_boundary.h"
 
@@ -17,6 +18,8 @@ namespace {
     std::wstring allocated_name {L"\\\\.\\DISPLAY3"};
     std::vector<std::wstring> released_displays;
     int ping_count {0};
+
+    void unresolved_cleanup(const std::wstring &) noexcept override {}
 
     bool is_driver_ready() override {
       return driver_ready;
@@ -123,7 +126,7 @@ namespace {
     EXPECT_EQ(boundary.get_active_session_count(), 0u);
   }
 
-  TEST_F(SessionDriverBoundaryTest, RollbackAllocationOnDuplicateSessionAcquire) {
+  TEST_F(SessionDriverBoundaryTest, PreservesAllocationOnDuplicateSessionAcquire) {
     platf::windows::session_driver_boundary_t boundary(authorizer, backend, 3);
 
     platf::windows::session_display_spec_t spec1;
@@ -143,11 +146,10 @@ namespace {
     spec2.height = 2160;
 
     auto [status2, alloc2] = boundary.acquire_session_display("session-dup", spec2);
-    EXPECT_EQ(status2, platf::windows::driver_boundary_status_e::ok);
+    EXPECT_EQ(status2, platf::windows::driver_boundary_status_e::duplicate_session);
     EXPECT_EQ(boundary.get_active_session_count(), 1u);
-    ASSERT_EQ(backend->released_displays.size(), 1u);
-    EXPECT_EQ(backend->released_displays[0], L"\\\\.\\DISPLAY3");
-    EXPECT_EQ(alloc2->display_name, L"\\\\.\\DISPLAY4");
+    EXPECT_TRUE(backend->released_displays.empty());
+    EXPECT_FALSE(alloc2.has_value());
   }
 
   TEST_F(SessionDriverBoundaryTest, DestructorPerformsCleanRollbackOfAllSessions) {
@@ -206,3 +208,4 @@ namespace {
   }
 
 }  // namespace
+#endif

@@ -1,108 +1,112 @@
-/**
- * @file src/platform/windows/session_driver_boundary.cpp
- * @brief Implementation of narrow C++ session and virtual display driver boundary.
+/** @file session_driver_boundary.cpp
+ * @brief Portable lifecycle implementation; no native driver or nvhttp wiring.
  */
 #include "src/platform/windows/session_driver_boundary.h"
+#include <limits>
+#include <type_traits>
 
 namespace platf::windows {
+  namespace {
+    static_assert(std::is_nothrow_move_assignable_v<std::wstring>);
+    static_assert(std::is_nothrow_move_constructible_v<std::pair<driver_boundary_status_e, std::optional<session_display_allocation_t>>>);
+    /** @brief Contain backend exceptions, retaining ownership on ambiguous failure. */
+    bool release_safely(idriver_backend_t &backend, const std::wstring &name) noexcept {
+      try { return backend.release_display(name); }
+      catch (...) { return false; }
+    }
+
+    /** @brief Immediate guard backed by ownership storage reserved before external I/O. */
+    struct allocation_guard_t {
+      idriver_backend_t &backend; ///< Backend outlives this guard.
+      std::wstring &name; ///< No-throw moved identifier in preallocated map record.
+      bool committed {false}; ///< Public snapshot successfully constructed.
+      ~allocation_guard_t() noexcept {
+        if (!committed && release_safely(backend, name)) { name.clear(); }
+      }
+    };
+  }
 
   session_driver_boundary_t::session_driver_boundary_t(
     std::shared_ptr<isession_authorizer_t> authorizer,
     std::shared_ptr<idriver_backend_t> backend,
     uint32_t max_consecutive_heartbeat_fails
-  ) :
-      _authorizer(std::move(authorizer)),
-      _backend(std::move(backend)),
-      _max_consecutive_heartbeat_fails(max_consecutive_heartbeat_fails) {
-  }
+  ) : _authorizer(std::move(authorizer)), _backend(std::move(backend)),
+      _max_consecutive_heartbeat_fails(max_consecutive_heartbeat_fails) {}
 
-  session_driver_boundary_t::~session_driver_boundary_t() {
-    rollback_all();
+  session_driver_boundary_t::~session_driver_boundary_t() noexcept {
+    close();
+    for (const auto &entry : _active_sessions) {
+      _backend->unresolved_cleanup(entry.second.display_name);
+    }
   }
 
   std::pair<driver_boundary_status_e, std::optional<session_display_allocation_t>>
-  session_driver_boundary_t::acquire_session_display(
-    const std::string &session_id,
-    const session_display_spec_t &spec
-  ) {
-    if (session_id.empty() || spec.client_uid.empty()) {
-      return {driver_boundary_status_e::unauthorized, std::nullopt};
-    }
-
-    if (spec.width == 0 || spec.height == 0 || spec.fps == 0) {
-      return {driver_boundary_status_e::invalid_dimensions, std::nullopt};
-    }
-
-    std::lock_guard<std::mutex> lock(_mutex);
-
-    // If session already holds an active display, rollback the prior display first
-    auto it = _active_sessions.find(session_id);
-    if (it != _active_sessions.end()) {
-      if (_backend) {
-        _backend->release_display(it->second.display_name);
-      }
-      _active_sessions.erase(it);
-    }
-
-    // Step 1: Pre-create authorization check
+  session_driver_boundary_t::acquire_session_display(const std::string &session_id, const session_display_spec_t &spec) {
+    if (session_id.empty() || spec.client_uid.empty()) { return {driver_boundary_status_e::unauthorized, {}}; }
+    if (!spec.width || !spec.height || !spec.fps) { return {driver_boundary_status_e::invalid_dimensions, {}}; }
+    std::lock_guard<std::mutex> operation(_operations);
+    // Authorization precedes duplicate lookup; denied requests never mutate ownership.
     if (!_authorizer || !_authorizer->authorize_session(session_id, spec)) {
-      return {driver_boundary_status_e::unauthorized, std::nullopt};
+      return {driver_boundary_status_e::unauthorized, {}};
     }
-
-    // Step 2: Driver readiness check
-    if (!_backend || !_backend->is_driver_ready()) {
-      return {driver_boundary_status_e::driver_not_ready, std::nullopt};
+    if (_closed) { return {driver_boundary_status_e::closed, {}}; }
+    if (_active_sessions.count(session_id)) { return {driver_boundary_status_e::duplicate_session, {}}; }
+    if (!_backend || !_backend->is_driver_ready()) { return {driver_boundary_status_e::driver_not_ready, {}}; }
+    // Map/key/spec allocations precede external resource acquisition.
+    auto it = _active_sessions.emplace(session_id, session_display_allocation_t {session_id, {}, spec, {}}).first;
+    try {
+      auto name = _backend->allocate_display(spec);
+      if (!name || name->empty()) {
+        _active_sessions.erase(it);
+        return {driver_boundary_status_e::allocation_failed, {}};
+      }
+      it->second.display_name = std::move(*name); // Standard allocator string move is noexcept.
+      allocation_guard_t guard {*_backend, it->second.display_name};
+      it->second.created_at = std::chrono::steady_clock::now();
+      std::pair<driver_boundary_status_e, std::optional<session_display_allocation_t>> result {
+        driver_boundary_status_e::ok, it->second
+      };
+      guard.committed = true;
+      return result;
     }
-
-    // Step 3: Low-level driver allocation
-    auto display_name = _backend->allocate_display(spec);
-    if (!display_name || display_name->empty()) {
-      return {driver_boundary_status_e::allocation_failed, std::nullopt};
+    catch (...) {
+      if (it->second.display_name.empty()) { _active_sessions.erase(it); }
+      throw;
     }
-
-    // Step 4: Register session ownership
-    session_display_allocation_t allocation {
-      session_id,
-      *display_name,
-      spec,
-      std::chrono::steady_clock::now()
-    };
-
-    _active_sessions.emplace(session_id, allocation);
-    return {driver_boundary_status_e::ok, allocation};
   }
 
   bool session_driver_boundary_t::release_session_display(const std::string &session_id) {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::mutex> operation(_operations);
     auto it = _active_sessions.find(session_id);
-    if (it == _active_sessions.end()) {
-      return false;
-    }
-
-    bool released = true;
-    if (_backend) {
-      released = _backend->release_display(it->second.display_name);
-    }
+    if (it == _active_sessions.end()) { return false; }
+    if (!release_safely(*_backend, it->second.display_name)) { return false; }
     _active_sessions.erase(it);
-    return released;
+    return true;
   }
 
+  session_driver_boundary_t::close_report_t session_driver_boundary_t::close() noexcept {
+    std::lock_guard<std::mutex> operation(_operations);
+    _closed = true;
+    close_report_t report;
+    for (auto it = _active_sessions.begin(); it != _active_sessions.end();) {
+      ++report.attempted;
+      if (release_safely(*_backend, it->second.display_name)) { it = _active_sessions.erase(it); }
+      else { ++report.unresolved; ++it; }
+    }
+    return report;
+  }
+
+  void session_driver_boundary_t::rollback_all() noexcept { close(); }
+
   bool session_driver_boundary_t::tick_heartbeat() {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (!_backend) {
-      _consecutive_heartbeat_fails++;
-      return false;
-    }
-
-    bool ping_ok = _backend->ping_watchdog();
-    if (ping_ok) {
-      // Immediate reset of consecutive failure counter
-      _consecutive_heartbeat_fails = 0;
-      return true;
-    }
-
-    _consecutive_heartbeat_fails++;
-    return _consecutive_heartbeat_fails <= _max_consecutive_heartbeat_fails;
+    // Separate lane: slow lifecycle I/O cannot block heartbeat scheduling.
+    std::lock_guard<std::mutex> heartbeat(_mutex);
+    bool ok = false;
+    try { ok = _backend && _backend->is_driver_ready() && _backend->ping_watchdog(); }
+    catch (...) {}
+    if (ok) { _consecutive_heartbeat_fails = 0; }
+    else if (_consecutive_heartbeat_fails != std::numeric_limits<uint32_t>::max()) { ++_consecutive_heartbeat_fails; }
+    return ok || (_backend && _consecutive_heartbeat_fails <= _max_consecutive_heartbeat_fails);
   }
 
   uint32_t session_driver_boundary_t::get_consecutive_heartbeat_failures() const {
@@ -111,23 +115,12 @@ namespace platf::windows {
   }
 
   size_t session_driver_boundary_t::get_active_session_count() const {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::mutex> operation(_operations);
     return _active_sessions.size();
   }
 
   bool session_driver_boundary_t::has_session(const std::string &session_id) const {
-    std::lock_guard<std::mutex> lock(_mutex);
-    return _active_sessions.find(session_id) != _active_sessions.end();
+    std::lock_guard<std::mutex> operation(_operations);
+    return _active_sessions.count(session_id) != 0;
   }
-
-  void session_driver_boundary_t::rollback_all() {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (_backend) {
-      for (const auto &pair : _active_sessions) {
-        _backend->release_display(pair.second.display_name);
-      }
-    }
-    _active_sessions.clear();
-  }
-
-}  // namespace platf::windows
+}

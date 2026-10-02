@@ -28,7 +28,9 @@ namespace platf::windows {
     invalid_dimensions = -2,   ///< Requested resolution or fps does not meet boundary constraints.
     allocation_failed = -3,    ///< Driver failed to allocate virtual display.
     heartbeat_stale = -4,      ///< Consecutive heartbeat failures exceeded threshold.
-    driver_not_ready = -5      ///< Virtual display device IOCTL handle unavailable.
+    driver_not_ready = -5,     ///< Virtual display device IOCTL handle unavailable.
+    duplicate_session = -6,   ///< Existing ownership, including failed cleanup, preserved.
+    closed = -7               ///< Shutdown has begun.
   };
 
   /**
@@ -69,7 +71,8 @@ namespace platf::windows {
     /**
      * @brief Allocate a virtual display device via IOCTL.
      * @param spec Display specifications.
-     * @return Assigned display device name or empty on failure.
+     * @return Unique nonempty display identifier or nullopt on failure.
+     * Exceptions/nullopt must leave no external allocation behind: backend self-reconciles.
      */
     virtual std::optional<std::wstring> allocate_display(const session_display_spec_t &spec) = 0;
 
@@ -85,6 +88,13 @@ namespace platf::windows {
      * @return True on successful ping response.
      */
     virtual bool ping_watchdog() = 0;
+
+    /**
+     * @brief Accept final unresolved cleanup responsibility without throwing.
+     * Backend must durably retain/reconcile the identifier before returning.
+     * @param display_name Identifier whose release failed or threw.
+     */
+    virtual void unresolved_cleanup(const std::wstring &display_name) noexcept = 0;
   };
 
   /**
@@ -105,6 +115,11 @@ namespace platf::windows {
 
   /**
    * @brief Session display boundary managing owned lifecycles and rollback.
+   * Explicit close retains failures for retry; destruction attempts every allocation and
+   * hands unresolved identifiers to the shared backend, not a promise of complete rollback.
+   * Callers must retain shared lifecycle ownership during every call; concurrent destruction
+   * is forbidden. Policy/backend calls must be bounded and nonreentrant. The backend must
+   * support concurrent watchdog and lifecycle operations (e.g. separate driver handles).
    */
   class session_driver_boundary_t {
   public:
@@ -120,12 +135,23 @@ namespace platf::windows {
       uint32_t max_consecutive_heartbeat_fails = 3
     );
 
-    ~session_driver_boundary_t();
+    ~session_driver_boundary_t() noexcept;
+
+    /** @brief Allocation-free shutdown report. */
+    struct close_report_t {
+      size_t attempted {0}; ///< Release attempts this pass.
+      size_t unresolved {0}; ///< Retained failures requiring reconciliation.
+    };
+
+    /** @brief Permanently reject new acquisitions; attempt all releases and retain failures. */
+    close_report_t close() noexcept;
 
     /**
      * @brief Request, authorize, and allocate a virtual display bound strictly to a session.
      *
-     * If allocation or configuration fails midway, any partial allocation is immediately rolled back.
+     * Snapshot allocation exceptions attempt cleanup and retain failures before rethrowing.
+     * Backend allocation must return an identifier or self-reconcile before throwing;
+     * no caller can recover an external identifier it never received.
      *
      * @param session_id Unique session identifier.
      * @param spec Requested display properties.
@@ -137,7 +163,7 @@ namespace platf::windows {
     /**
      * @brief Explicitly release and rollback a session's allocated virtual display.
      * @param session_id Session identifier.
-     * @return True if found and cleanly destroyed, false if session had no allocation.
+     * @return True if destroyed; false if absent or retained after failed/throwing cleanup.
      */
     bool release_session_display(const std::string &session_id);
 
@@ -170,9 +196,9 @@ namespace platf::windows {
     bool has_session(const std::string &session_id) const;
 
     /**
-     * @brief Rollback and destroy all active session allocations (used on daemon teardown/fail).
+     * @brief Shutdown alias for close(); failures remain owned and acquisitions stay closed.
      */
-    void rollback_all();
+    void rollback_all() noexcept;
 
   private:
     std::shared_ptr<isession_authorizer_t> _authorizer;
@@ -182,6 +208,8 @@ namespace platf::windows {
     mutable std::mutex _mutex;
     uint32_t _consecutive_heartbeat_fails {0};
     std::unordered_map<std::string, session_display_allocation_t> _active_sessions;
+    mutable std::mutex _operations; ///< Lifecycle lane, independent of watchdog mutex.
+    bool _closed {false}; ///< Failed cleanup remains retryable after irreversible close.
   };
 
 }  // namespace platf::windows
