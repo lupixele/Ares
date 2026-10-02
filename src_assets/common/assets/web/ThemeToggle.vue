@@ -10,15 +10,15 @@ onMounted(() => {
 
 <template>
   <div class="dropdown bd-mode-toggle">
-    <a class="nav-link dropdown-toggle align-items-center"
+    <button class="nav-link dropdown-toggle align-items-center btn btn-link p-0"
             id="bd-theme"
             type="button"
             aria-expanded="false"
             data-bs-toggle="dropdown"
-            aria-label="{{ $t('navbar.toggle_theme') }} ({{ $t('navbar.theme_auto') }})">
+            :aria-label="`${$t('navbar.toggle_theme')} (${$t('navbar.theme_auto')})`">
       <span class="bi my-1 theme-icon-active"><i class="fa-solid fa-circle-half-stroke"></i></span>
       <span id="bd-theme-text">{{ $t('navbar.toggle_theme') }}</span>
-    </a>
+    </button>
     <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="bd-theme-text">
       <li>
         <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="light" aria-pressed="false">

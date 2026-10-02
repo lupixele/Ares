@@ -168,12 +168,17 @@ watch(mobileOpen, (open) => {
   }
 })
 
+function isBootstrapDropdownOpen() {
+  // Check if any Bootstrap dropdown is currently shown; if so, leave Escape/Tab to Bootstrap
+  return !!document.querySelector('.dropdown-menu.show')
+}
+
 function onKeyDown(e) {
-  if (e.key === 'Escape' && mobileOpen.value) {
+  if (e.key === 'Escape' && mobileOpen.value && !isBootstrapDropdownOpen()) {
     mobileOpen.value = false
   }
-  // Trap Tab within sidebar when mobile sheet is open
-  if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value) {
+  // Trap Tab within sidebar when mobile sheet is open, but not when a dropdown is open
+  if (e.key === 'Tab' && mobileOpen.value && sidebarEl.value && !isBootstrapDropdownOpen()) {
     const el = sidebarEl.value
     const focusable = Array.from(
       el.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
