@@ -1,0 +1,29 @@
+/*
+ * Ares sidebar layout helpers
+ * Loaded via template_header.html
+ */
+
+/* Push page content right of the sidebar on desktop */
+.ares-page-body {
+  margin-left: 220px;
+  transition: margin-left 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  min-height: 100vh;
+  padding-top: 0;
+}
+
+/* Collapsed state — triggered by JS class on <html> */
+html:not(.ares-sidebar-expanded) .ares-page-body {
+  margin-left: 56px;
+}
+
+@media (max-width: 768px) {
+  .ares-page-body {
+    margin-left: 0 !important;
+    padding-top: 52px; /* room for mobile trigger */
+  }
+}
+
+/* Slightly tighten the original .container inside the body */
+.ares-page-body > .container {
+  max-width: 1200px;
+}
