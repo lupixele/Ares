@@ -770,18 +770,16 @@
         client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display;
       },
       saveClient(client) {
-        client.editing = false;
-        currentEditingClient = null;
         const editedClient = {
           uuid: client.uuid,
           name: client.editName,
-          display_mode: client.editDisplayMode.trim(),
+          display_mode: (client.editDisplayMode || '').trim(),
           allow_client_commands: client.editAllowClientCommands,
           enable_legacy_ordering: client.editEnableLegacyOrdering,
           always_use_virtual_display: client.editAlwaysUseVirtualDisplay,
           perm: client.editPerm & permissionMapping._all,
-          do: client.edit_do.reduce((filtered, {cmd: _cmd, elevated}) => {
-            const cmd = _cmd.trim()
+          do: (client.edit_do || []).reduce((filtered, {cmd: _cmd, elevated}) => {
+            const cmd = (_cmd || '').trim()
             if (cmd) {
               filtered.push({
                 cmd,
@@ -790,8 +788,8 @@
             }
             return filtered
           }, []),
-          undo: client.edit_undo.reduce((filtered, {cmd: _cmd, elevated}) => {
-            const cmd = _cmd.trim()
+          undo: (client.edit_undo || []).reduce((filtered, {cmd: _cmd, elevated}) => {
+            const cmd = (_cmd || '').trim()
             if (cmd) {
               filtered.push({
                 cmd,
@@ -801,7 +799,7 @@
             return filtered
           }, [])
         }
-        fetch("./api/clients/update", {
+        return fetch("./api/clients/update", {
           credentials: 'include',
           headers: {
             'Content-Type': 'application/json'
@@ -809,22 +807,44 @@
           method: 'POST',
           body: JSON.stringify(editedClient)
         })
-        .then(resp => resp.json())
+        .then(async resp => {
+          if (!resp.ok) {
+            let msg = resp.statusText;
+            try {
+              const b = await resp.json();
+              if (b && (b.message || b.error)) msg = b.message || b.error;
+            } catch (_) {}
+            throw new Error(msg || 'Failed to update client');
+          }
+          return resp.json();
+        })
         .then(resp => {
-          if (resp.status) {
-            this.refreshClients();
+          if (resp && resp.status === true) {
+            client.name = editedClient.name;
+            client.display_mode = editedClient.display_mode;
+            client.allow_client_commands = editedClient.allow_client_commands;
+            client.enable_legacy_ordering = editedClient.enable_legacy_ordering;
+            client.always_use_virtual_display = editedClient.always_use_virtual_display;
+            client.perm = editedClient.perm;
+            client.do = editedClient.do;
+            client.undo = editedClient.undo;
+            client.editing = false;
+            currentEditingClient = null;
+            setTimeout(() => {
+              this.refreshClients();
+            }, 1000);
+            return true;
           } else {
-            throw new Error(resp.message);
+            throw new Error((resp && (resp.message || resp.error)) || 'Failed to update client');
           }
         })
         .catch(err => {
-          alert(this.i18n.t('pin.save_client_error') + err);
-        })
-        .finally(() => {
-          setTimeout(() => {
-            this.refreshClients();
-          }, 1000);
+          alert(this.i18n.t('pin.save_client_error') + (err.message || err));
+          return false;
         });
+      },
+      updateClient(client) {
+        return this.saveClient(client);
       },
       permToStr(perm) {
         const permSegments = [];
@@ -858,17 +878,38 @@
         event.target.reportValidity();
       },
       disconnectClient(uuid) {
-        fetch("./api/clients/disconnect", {
+        return fetch("./api/clients/disconnect", {
           credentials: 'include',
           headers: {
             'Content-Type': 'application/json'
           },
           method: 'POST',
           body: JSON.stringify({ uuid })
-        }).finally(() => {
-          setTimeout(() => {
-            this.refreshClients();
-          }, 1000);
+        })
+        .then(async (resp) => {
+          if (!resp.ok) {
+            let msg = resp.statusText;
+            try {
+              const b = await resp.json();
+              if (b && (b.message || b.error)) msg = b.message || b.error;
+            } catch (_) {}
+            throw new Error(msg || 'Failed to disconnect client');
+          }
+          return resp.json();
+        })
+        .then((body) => {
+          if (body && body.status === true) {
+            setTimeout(() => {
+              this.refreshClients();
+            }, 1000);
+            return true;
+          } else {
+            throw new Error((body && (body.message || body.error)) || 'Failed to disconnect client');
+          }
+        })
+        .catch((err) => {
+          alert(err.message || String(err));
+          return false;
         });
       },
       unpairAll() {

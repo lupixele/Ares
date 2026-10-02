@@ -876,10 +876,20 @@
       fetch("./api/config", {
         credentials: 'include'
       })
-        .then(r => r.json())
-        .then(r => this.platform = r.platform);
+        .then(async r => {
+          if (!r.ok) throw new Error(`Failed to load platform (HTTP ${r.status})`);
+          return r.json();
+        })
+        .then(r => this.platform = r.platform)
+        .catch(err => { alert(err.message); });
     },
     methods: {
+      async requireSuccess(response) {
+        if (!response.ok) throw new Error(`Request failed (HTTP ${response.status})`);
+        const body = await response.json();
+        if (body.status !== true) throw new Error(body.error || body.message || 'Request failed');
+        return body;
+      },
       onDragStart(e, idx) {
         if (this.showEditForm) {
           e.preventDefault();
@@ -946,6 +956,7 @@
         }
       },
       saveOrder() {
+        if (this.actionDisabled) return Promise.resolve(false);
         this.actionDisabled = true;
 
         const reorderedUUIDs = this.apps.reduce((reordered, i) => {
@@ -955,7 +966,7 @@
           return reordered
         }, [])
 
-        fetch("./api/apps/reorder", {
+        return fetch("./api/apps/reorder", {
           credentials: 'include',
           headers: {
             'Content-Type': 'application/json'
@@ -963,15 +974,16 @@
           method: 'POST',
           body: JSON.stringify({order: reorderedUUIDs})
         })
-        .then(r => r.json())
+        .then(this.requireSuccess)
         .then((r) => {
           if (!r.status) {
             alert(this.$t("apps.reorder_failed") + r.error);
           }
         })
-        .finally(() => {
+        .then(() => {
           return this.loadApps();
         })
+        .catch(err => { alert(this.$t('apps.reorder_failed') + err.message); return false; })
         .finally(() => {
           this.actionDisabled = false;
         })
@@ -980,20 +992,26 @@
         return fetch("./api/apps", {
           credentials: 'include'
         })
-        .then(r => r.json())
+        .then(async r => {
+          if (!r.ok) throw new Error(`Failed to load applications (HTTP ${r.status})`);
+          const body = await r.json();
+          if (!Array.isArray(body.apps)) throw new Error('Invalid applications response');
+          return body;
+        })
         .then(r => {
           this.apps = r.apps.filter(i => i.uuid).map(i => ({...i, launching: false, dragover: false}));
           this.currentApp = r.current_app;
           this.hostName = r.host_name;
           this.hostUUID = r.host_uuid;
           this.listReordered = false;
-        });
+        }).catch(err => { alert(err.message); return false; });
       },
       newApp() {
-        this.editForm = Object.assign({}, newApp);
+        this.editForm = JSON.parse(JSON.stringify(newApp));
         this.showEditForm = true;
       },
       launchApp(event, app) {
+        if (this.actionDisabled) return;
         const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
 
         if (!isLocalHost && confirm(this.$t('apps.launch_local_client'))) {
@@ -1005,7 +1023,7 @@
 
         if (confirm(this.$t('apps.launch_warning'))) {
           this.actionDisabled = true;
-          fetch("./api/apps/launch", {
+          return fetch("./api/apps/launch", {
             credentials: 'include',
             headers: {
               'Content-Type': 'application/json'
@@ -1013,37 +1031,40 @@
             method: 'POST',
             body: JSON.stringify({ uuid: app.uuid })
           })
-          .then(r => r.json())
+          .then(this.requireSuccess)
           .then(r => {
             if (!r.status) {
               alert(this.$t('apps.launch_failed') + r.error);
             }
           })
+          .then(() => this.loadApps())
+          .catch(err => { alert(this.$t('apps.launch_failed') + err.message); return false; })
           .finally(() => {
             this.actionDisabled = false;
-            this.loadApps()
           });
         }
       },
       closeApp() {
+        if (this.actionDisabled) return;
         if (confirm(this.$t('apps.close_warning'))) {
           this.actionDisabled = true;
-          fetch("./api/apps/close", {
+          return fetch("./api/apps/close", {
             credentials: 'include',
             headers: {
               'Content-Type': 'application/json'
             },
             method: 'POST',
           })
-          .then((r) => r.json())
+          .then(this.requireSuccess)
           .then((r) => {
             if (!r.status) {
               alert("apps.close_failed")
             }
           })
+          .then(() => this.loadApps())
+          .catch(err => { alert(this.$t('apps.close_failed') + err.message); return false; })
           .finally(() => {
             this.actionDisabled = false;
-            this.loadApps()
           });
         }
       },
@@ -1067,27 +1088,29 @@
         link.click();
       },
       showDeleteForm(app) {
+        if (this.actionDisabled) return;
         const resp = confirm(
           "Are you sure to delete " + app.name + "?"
         );
         if (resp) {
           this.actionDisabled = true;
-          fetch("./api/apps/delete", {
+          return fetch("./api/apps/delete", {
             credentials: 'include',
             headers: {
               'Content-Type': 'application/json'
             },
             method: 'POST',
             body: JSON.stringify({ uuid: app.uuid })
-          }).then((r) => r.json())
+          }).then(this.requireSuccess)
           .then((r) => {
             if (!r.status) {
               alert("Delete failed! " + r.error);
             }
           })
+          .then(() => this.loadApps())
+          .catch(err => { alert('Delete failed! ' + err.message); return false; })
           .finally(() => {
             this.actionDisabled = false;
-            this.loadApps();
           });
         }
       },
@@ -1208,24 +1231,33 @@
           .finally(() => this.coverFinderBusy = false);
       },
       save() {
+        if (this.actionDisabled) return Promise.resolve(false);
         this.editForm.name = this.editForm.name.trim();
         if (!this.editForm.name) {
           return;
         }
-        this.editForm["exit-timeout"] = parseInt(this.editForm["exit-timeout"]) || 5
-        this.editForm["scale-factor"] = parseInt(this.editForm["scale-factor"]) || 100
+        const timeout = Number(this.editForm['exit-timeout']);
+        const scale = Number(this.editForm['scale-factor']);
+        if (!Number.isInteger(timeout) || timeout < 0 || timeout > 2147483647 ||
+            !Number.isInteger(scale) || scale < 25 || scale > 200) {
+          alert('Exit timeout must be a nonnegative integer; scale factor must be an integer between 25 and 200.');
+          return Promise.resolve(false);
+        }
+        this.editForm['exit-timeout'] = timeout;
+        this.editForm['scale-factor'] = scale;
         this.editForm["image-path"] = this.editForm["image-path"] ? this.editForm["image-path"].toString().trim().replace(/"/g, '') : '';
         delete this.editForm.id;
         delete this.editForm.launching;
         delete this.editForm.dragover;
-        fetch("./api/apps", {
+        this.actionDisabled = true;
+        return fetch("./api/apps", {
           credentials: 'include',
           headers: {
             'Content-Type': 'application/json'
           },
           method: 'POST',
           body: JSON.stringify(this.editForm)
-        }).then((r) => r.json())
+        }).then(this.requireSuccess)
         .then((r) => {
           if (r.status) {
             this.showEditForm = false;
@@ -1233,9 +1265,9 @@
             alert(this.$t('apps.save_failed') + r.error);
           }
         })
-        .finally(() => {
-          this.loadApps();
-        });
+        .then(() => this.loadApps())
+        .catch(err => { alert(this.$t('apps.save_failed') + err.message); return false; })
+        .finally(() => { this.actionDisabled = false; });
       },
     }
   });

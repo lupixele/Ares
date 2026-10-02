@@ -78,6 +78,7 @@
   <AresSidebar></AresSidebar>
   <div class="ares-page-body container">
     <h1 class="my-4">{{ $t('config.configuration') }}</h1>
+    <div v-if="loadError" class="alert alert-danger" role="alert">{{ loadError }}</div>
     <div v-if="config">
       <!-- Tab navigation -->
       <ul class="nav nav-tabs" role="tablist">
@@ -158,7 +159,7 @@
     <!-- Save bar: sticky at bottom, shows dirty state and outcomes -->
     <div class="config-save-bar" v-if="config">
       <!-- Dirty indicator -->
-      <div class="config-save-bar__dirty" v-if="isDirty && !saved && !saveError">
+      <div class="config-save-bar__dirty" v-if="isDirty">
         <span class="config-save-bar__dirty-dot" aria-hidden="true"></span>
         {{ $t('config.unsaved_changes', 'Unsaved changes') }}
       </div>
@@ -178,8 +179,8 @@
         <b>{{ $t('_common.error', 'Error') }}</b> {{ $t('config.save_error', 'Failed to save configuration. Please try again.') }}
       </div>
 
-      <button class="btn btn-primary" @click="save">{{ $t('_common.save') }}</button>
-      <button class="btn btn-success" @click="apply" v-if="saved && !restarted">{{ $t('_common.apply') }}</button>
+      <button class="btn btn-primary" @click="save" :disabled="saving || !configLoaded || !isDirty">{{ $t('_common.save') }}</button>
+      <button class="btn btn-success" @click="apply" :disabled="saving || !configLoaded" v-if="(isDirty || saved) && !restarted">{{ $t('_common.apply') }}</button>
     </div>
   </div>
 </body>
@@ -218,6 +219,9 @@
         saved: false,
         restarted: false,
         saveError: false,
+        saving: false,
+        configLoaded: false,
+        loadError: '',
         config: null,
         configSnapshot: null,
         currentTab: "general",
@@ -428,8 +432,15 @@
         this.serverCmdSnapshot = JSON.stringify(this.server_cmd);
       },
       load() {
+        this.configLoaded = false;
+        this.loadError = '';
         return fetch("./api/config", { credentials: 'include' })
-          .then((r) => r.json())
+          .then(async (r) => {
+            if (!r.ok) throw new Error(`Failed to load configuration (HTTP ${r.status})`);
+            const body = await r.json();
+            if (body.status !== true) throw new Error(body.message || body.error || 'Failed to load configuration');
+            return body;
+          })
           .then((r) => {
             this.platform = r.platform;
 
@@ -438,6 +449,8 @@
             delete r.platform;
             delete r.status;
             delete r.version;
+            delete r.unique_id;
+            delete r.input_only;
 
             this.config = r;
 
@@ -486,9 +499,18 @@
             this.server_cmd = this.config.server_cmd;
 
             this._takeSnapshot();
+            this.configLoaded = true;
+          })
+          .catch((err) => {
+            this.config = null;
+            this.configSnapshot = null;
+            this.loadError = err.message || 'Failed to load configuration';
           });
       },
       save() {
+        if (this.saving || !this.configLoaded) return Promise.resolve(false);
+        this.saving = true;
+        this.saved = false;
         this.saveError = false;
 
         // Validate fallback mode
@@ -499,6 +521,13 @@
         }
 
         let config = JSON.parse(JSON.stringify(this.config));
+        const submittedSnapshots = {
+          configSnapshot: JSON.stringify(this.config),
+          globalPrepCmdSnapshot: JSON.stringify(this.global_prep_cmd),
+          globalStateCmdSnapshot: JSON.stringify(this.global_state_cmd),
+          serverCmdSnapshot: JSON.stringify(this.server_cmd),
+        };
+        for (const key of ['status', 'platform', 'version', 'vdisplayStatus', 'unique_id', 'input_only']) delete config[key];
 
         // Synchronize and filter command arrays into config before saving
         config.global_prep_cmd = this.global_prep_cmd.filter(cmd => (cmd.do && cmd.do.trim()) || (cmd.undo && cmd.undo.trim()));
@@ -528,11 +557,13 @@
           },
           method: 'POST',
           body: JSON.stringify(config),
-        }).then((r) => {
-          if (r.status === 200) {
+        }).then(async (r) => {
+          if (!r.ok) throw new Error(`Configuration save failed (HTTP ${r.status})`);
+          const body = await r.json();
+          if (body.status === true) {
             this.saved = true
             this.saveError = false
-            this._takeSnapshot();
+            Object.assign(this, submittedSnapshots);
             return this.saved
           }
           else {
@@ -542,25 +573,27 @@
         }).catch(() => {
           this.saveError = true
           return false
-        });
+        }).finally(() => { this.saving = false; });
       },
       apply() {
+        if (this.saving || !this.configLoaded) return Promise.resolve(false);
         this.saved = this.restarted = false;
         let saved = this.save();
 
-        saved.then((result) => {
+        return saved.then((result) => {
           if (result === true) {
             this.restarted = true;
             setTimeout(() => {
               this.saved = this.restarted = false;
             }, 5000);
-            fetch("./api/restart", {
+            return fetch("./api/restart", {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json'
               }
             })
             .then((resp) => {
+              if (!resp.ok) throw new Error(`Restart failed (HTTP ${resp.status})`);
               if (resp.status !== 200) {
                 location.reload();
                 return
@@ -571,9 +604,10 @@
               setTimeout(() => {
                 location.reload();
               }, 1000);
-              return;
-            });
+              return true;
+            }).catch(() => { this.saveError = true; return false; });
           }
+          return false;
         });
       },
     },
