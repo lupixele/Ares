@@ -2,7 +2,7 @@
 
 Ares is an open-source, self-hosted desktop streaming server designed to pair with [Athena](https://github.com/lupixele/Athena) (and compatible Moonlight / Artemis clients). Offering low latency, native client resolution matching, and cloud gaming server capabilities, Ares supports AMD, Intel, and Nvidia hardware encoding alongside software encoding fallback. A modernized web interface is provided for configuration and secure client pairing.
 
-* Repository: [https://github.com/lupixele/Ares](https://github.com/lupixele/Ares)
+
 * Paired Android Client: [Athena](https://github.com/lupixele/Athena)
 
 ---
