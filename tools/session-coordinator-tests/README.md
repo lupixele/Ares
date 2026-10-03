@@ -24,7 +24,10 @@ prepare and whole-coordinator close require the token. Arbitrary callback execut
 API removed. Reusing a released session ID cannot accept old-token mutations.
 
 External calls NEVER run under the snapshot mutex. Callbacks may query snapshots;
-callbacks MUST NOT reenter mutations or recovery retry. Snapshot during an external
+callbacks MUST NOT reenter mutations or recovery retry. Specifically, provider callbacks
+invoked during ledger cleanup/retry execute while recovery_ledger_t::mutex_ is held;
+implementations MUST NOT call ledger.pending() or ledger.retry() synchronously, as
+the non-recursive mutex will deadlock. Snapshot during an external
 operation reflects the last completed publication, not partial mutable ownership.
 Dependencies must return in bounded time. No forced cancellation of hung external
 code is promised. Owner must quiesce all callers before destruction.

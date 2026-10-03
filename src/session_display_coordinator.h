@@ -31,7 +31,14 @@ namespace ares::session {
   };
   /** @brief Real asynchronous publication acknowledgement. */
   enum class publication_e { pending, ready, failed };
-  /** @brief Provider owns any allocation that throws before returning its handle. */
+  /**
+   * @brief Provider owns any allocation that throws before returning its handle.
+   *
+   * @note Contract: Provider callbacks (restore_display, release_display) invoked during
+   *       recovery ledger cleanup/retry execute while recovery_ledger_t::mutex_ is held.
+   *       Provider implementations MUST NOT call recovery_ledger_t methods (such as
+   *       pending() or retry()), as attempting to re-enter the ledger will deadlock.
+   */
   struct idisplay_provider_t {
     virtual ~idisplay_provider_t() = default;
     virtual std::optional<std::wstring> allocate_display(const display_mode_spec_t &) = 0;
@@ -41,7 +48,13 @@ namespace ares::session {
     virtual bool release_display(const std::wstring &) = 0;
     virtual void on_unresolved_resource(const std::wstring &) = 0;
   };
-  /** @brief Stop/join must quiesce even a partially failed/throwing start. */
+  /**
+   * @brief Stop/join must quiesce even a partially failed/throwing start.
+   *
+   * @note Contract: Lifecycle callbacks (stop_and_join_app) invoked during recovery ledger
+   *       cleanup/retry execute while recovery_ledger_t::mutex_ is held. Provider implementations
+   *       MUST NOT call recovery_ledger_t methods (such as pending() or retry()) synchronously.
+   */
   struct iapp_lifecycle_t {
     virtual ~iapp_lifecycle_t() = default;
     virtual bool start_app(const std::string &, const std::wstring &) = 0;

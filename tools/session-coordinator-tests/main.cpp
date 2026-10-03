@@ -136,6 +136,7 @@ static void concurrent_retry() {
   fixture_t x; x.run(); x.f->restore=false; x.c.reset(); x.f->restore=true; gate_t gate;
   x.f->callback=[&](const auto &s) { if (s=="restore") { gate.wait(); } };
   auto a=std::async(std::launch::async,[&]{return x.ledger->retry();}); gate.entered();
+  // entered.set_value() ensures second thread launched before proceed is signaled; not a proof of OS-level lock suspension.
   std::promise<void> entered; auto b=std::async(std::launch::async,[&]{entered.set_value(); return x.ledger->retry();});
   CHECK(entered.get_future().wait_for(3s)==std::future_status::ready); gate.proceed.set_value();
   CHECK(a.get()==0); CHECK(b.get()==0); CHECK(x.f->count("release")==1); x.f->callback={};
@@ -150,6 +151,17 @@ static void stop_during_start() {
   auto fresh=x.prepare(); CHECK(fresh>g); CHECK(x.c->start_session("s",g)==coordinator_status_e::invalid_state);
 }
 static void view_policy() { fixture_t x; auto g=x.prepare(action_e::view); CHECK(x.c->start_session("s",g)==coordinator_status_e::ok); CHECK(x.f->count("start")==0); CHECK(x.c->stop_session("s",g)==coordinator_status_e::ok); CHECK(x.f->count("stop")==0); }
+static void view_disconnect_retain() {
+  fixture_t x; auto g=x.prepare(action_e::view);
+  CHECK(x.c->start_session("s",g)==coordinator_status_e::ok);
+  CHECK(x.f->count("start")==0);
+  CHECK(x.c->disconnect_session("s",g,true)==coordinator_status_e::ok);
+  x.state(session_display_state_e::released);
+  CHECK(x.f->count("start")==0);
+  CHECK(x.f->count("stop")==0);
+  CHECK(x.f->count("restore")==1);
+  CHECK(x.f->count("release")==1);
+}
 static void destructor_attempt_all() {
   fixture_t x; x.run();
   CHECK(x.c->prepare_session("second",{"client","",""},{})==coordinator_status_e::ok);
@@ -162,7 +174,7 @@ static void destructor_attempt_all() {
 int main(int argc, char **argv) {
   const std::vector<std::pair<std::string,void(*)()>> tests={
     {"destructor_attempt_all",destructor_attempt_all},
-    {"denial",denial},{"bounds",bounds},{"allocation_failure",allocation_failure},{"publication_failure",publication_failure},{"probe_failure",probe_failure},{"app_failure",app_failure},{"active_stop",active_stop},{"pending_timeout",pending_timeout},{"pending_ready",pending_ready},{"retained",retained},{"stale_generation",stale_generation},{"restore_retry",restore_retry},{"release_retry",release_retry},{"stop_failure",stop_failure},{"queries",queries},{"exceptions",exceptions},{"destructor_handoff",destructor_handoff},{"concurrent_retry",concurrent_retry},{"stop_during_start",stop_during_start},{"view_policy",view_policy}};
+    {"denial",denial},{"bounds",bounds},{"allocation_failure",allocation_failure},{"publication_failure",publication_failure},{"probe_failure",probe_failure},{"app_failure",app_failure},{"active_stop",active_stop},{"pending_timeout",pending_timeout},{"pending_ready",pending_ready},{"retained",retained},{"stale_generation",stale_generation},{"restore_retry",restore_retry},{"release_retry",release_retry},{"stop_failure",stop_failure},{"queries",queries},{"exceptions",exceptions},{"destructor_handoff",destructor_handoff},{"concurrent_retry",concurrent_retry},{"stop_during_start",stop_during_start},{"view_policy",view_policy},{"view_disconnect_retain",view_disconnect_retain}};
   try { for (auto &[name,fn]:tests) { if (argc==2 && name==argv[1]) { fn(); std::cout<<name<<" passed\n"; return 0; } } }
   catch(const std::exception &e) { std::cerr<<e.what()<<'\n'; return 1; }
   return 2;
