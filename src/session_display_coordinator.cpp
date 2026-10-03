@@ -1,438 +1,177 @@
-/**
- * @file src/session_display_coordinator.cpp
- * @brief Implementation of session display coordinator.
- */
+/** @file @brief Serialized experimental coordinator implementation. */
 #include "src/session_display_coordinator.h"
+#include <atomic>
+#include <limits>
+#include <stdexcept>
+#include <algorithm>
 
 namespace ares::session {
-
-  session_display_coordinator_t::session_display_coordinator_t(
-    std::shared_ptr<itrusted_registry_t> registry,
-    std::shared_ptr<idisplay_provider_t> display_provider,
-    std::shared_ptr<iapp_lifecycle_t> app_lifecycle,
-    std::shared_ptr<iclock_t> clock,
-    std::chrono::milliseconds pending_timeout
-  ) :
-      registry_(std::move(registry)),
-      display_provider_(std::move(display_provider)),
-      app_lifecycle_(std::move(app_lifecycle)),
-      clock_(std::move(clock)),
-      pending_timeout_(pending_timeout) {}
-
+  namespace {
+    // Process-global, never reset on session reuse or coordinator reconstruction.
+    std::atomic<uint64_t> next_generation{0};
+    uint64_t token() {
+      auto n = next_generation.load();
+      do {
+        if (n == std::numeric_limits<uint64_t>::max()) {
+          throw std::overflow_error("incarnation exhausted");
+        }
+      } while (!next_generation.compare_exchange_weak(n, n + 1));
+      return n + 1;
+    }
+  }
+  bool recovery_ledger_t::cleanup(obligation_t &o) noexcept {
+    try {
+      if (o.app_live) {
+        if (!o.app->stop_and_join_app(o.session_id)) { return false; }
+        o.app_live = false;
+      }
+      if (o.topology) {
+        if (!o.display->restore_display(o.resource)) { return false; }
+        o.topology = false;
+      }
+      if (o.allocation) {
+        if (!o.display->release_display(o.resource)) { return false; }
+        o.allocation = false;
+        o.resource.clear();
+      }
+      return true;
+    } catch (...) { return false; }
+  }
+  size_t recovery_ledger_t::retry() {
+    std::lock_guard lock(mutex_);
+    entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [](auto &o) {
+      return !o->active && cleanup(*o);
+    }), entries_.end());
+    return entries_.size();
+  }
+  size_t recovery_ledger_t::pending() const {
+    std::lock_guard lock(mutex_);
+    return entries_.size();
+  }
+  session_display_coordinator_t::session_display_coordinator_t(std::shared_ptr<itrusted_registry_t> r, std::shared_ptr<idisplay_provider_t> d, std::shared_ptr<iapp_lifecycle_t> a, std::shared_ptr<iclock_t> c, std::shared_ptr<recovery_ledger_t> l, std::chrono::milliseconds t) : registry_(std::move(r)), display_(std::move(d)), app_(std::move(a)), clock_(std::move(c)), ledger_(std::move(l)), timeout_(t) {
+    if (!registry_ || !display_ || !app_ || !clock_ || !ledger_ || t.count() <= 0) { throw std::invalid_argument("coordinator dependencies/timeout"); }
+  }
   session_display_coordinator_t::~session_display_coordinator_t() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto &pair : sessions_) {
-      auto &rec = pair.second.record;
-      if (!rec.allocated_resource.empty()) {
-        bool restored = false;
-        try {
-          if (display_provider_) {
-            restored = display_provider_->restore_display(rec.allocated_resource);
-          }
-        } catch (...) {
-          restored = false;
-        }
-
-        bool released = false;
-        try {
-          if (display_provider_) {
-            released = display_provider_->release_display(rec.allocated_resource);
-          }
-        } catch (...) {
-          released = false;
-        }
-
-        if (!restored || !released) {
-          unresolved_resources_.push_back(rec.allocated_resource);
-          if (display_provider_) {
-            display_provider_->on_unresolved_resource(rec.allocated_resource);
-          }
-        }
-        rec.allocated_resource.clear();
-      }
-    }
-    sessions_.clear();
+    try { close(); } catch (...) {}
+    // No allocation in handoff: ledger already owns every obligation and dependency.
+    std::lock_guard lock(ledger_->mutex_);
+    for (auto &[id, e] : entries_) { (void)id; e.obligation->active = false; }
   }
-
-  coordinator_status_e session_display_coordinator_t::prepare_session(
-    const std::string &session_id,
-    const paired_principal_t &principal,
-    const std::string &server_session_token,
-    const signed_resolution_request_t &request
-  ) {
-    if (session_id.empty() || principal.client_id.empty() || server_session_token.empty()) {
-      return coordinator_status_e::unauthorized;
+  void session_display_coordinator_t::publish(const entry_t &e) {
+    std::lock_guard lock(snapshots_mutex_);
+    snapshots_.insert_or_assign(e.record.session_id, e.record);
+  }
+  std::optional<session_display_record_t> session_display_coordinator_t::get_session(const std::string &id) const {
+    std::lock_guard lock(snapshots_mutex_);
+    auto it = snapshots_.find(id);
+    if (it == snapshots_.end()) { return std::nullopt; }
+    return it->second;
+  }
+  session_display_coordinator_t::entry_t *session_display_coordinator_t::find(const std::string &id, uint64_t generation) {
+    auto it = entries_.find(id);
+    return it != entries_.end() && it->second.record.generation == generation ? &it->second : nullptr;
+  }
+  coordinator_status_e session_display_coordinator_t::prepare_session(const std::string &id, const paired_principal_t &p, const display_mode_spec_t &m, action_e action) {
+    std::lock_guard lock(operations_);
+    if (m.width < 640 || m.width > 7680 || m.height < 480 || m.height > 4320 || m.refresh_rate < 24 || m.refresh_rate > 240) { return coordinator_status_e::invalid_resolution; }
+    if (id.empty() || p.client_id.empty()) { return coordinator_status_e::unauthorized; }
+    try {
+      auto policy = registry_->authorize(p, action);
+      if (!policy.action_allowed || !policy.display_allowed || !policy.mode_allowed || (m.hdr_capable && !policy.hdr_allowed)) { return coordinator_status_e::unauthorized; }
+    } catch (...) { return coordinator_status_e::unauthorized; }
+    auto old = entries_.find(id);
+    if (old != entries_.end() && old->second.record.state != session_display_state_e::released) { return coordinator_status_e::invalid_state; }
+    auto o = std::make_shared<recovery_ledger_t::obligation_t>();
+    o->session_id = id; o->display = display_; o->app = app_;
+    entry_t e{{id, m, session_display_state_e::prepared, {}, token()}, o, {}, action};
+    {
+      std::lock_guard ledger_lock(ledger_->mutex_);
+      ledger_->entries_.push_back(o);
     }
-
-    if (!registry_) {
-      return coordinator_status_e::unauthorized;
+    try { entries_.insert_or_assign(id, std::move(e)); }
+    catch (...) {
+      std::lock_guard ledger_lock(ledger_->mutex_);
+      ledger_->entries_.erase(std::remove(ledger_->entries_.begin(), ledger_->entries_.end(), o), ledger_->entries_.end());
+      throw;
     }
-
-    // Pre-create authorization check: explicit Apollo permissions from trusted registry
-    auto permissions_opt = registry_->get_principal_permissions(principal);
-    if (!permissions_opt.has_value()) {
-      // Explicitly deny if unset/missing
-      return coordinator_status_e::unauthorized;
-    }
-
-    auto perms = permissions_opt.value();
-    if ((perms & apollo_permission_flags_e::virtual_display_allowed) == apollo_permission_flags_e::none) {
-      return coordinator_status_e::unauthorized;
-    }
-
-    // Verify token matches request
-    if (request.server_session_token != server_session_token) {
-      return coordinator_status_e::unauthorized;
-    }
-
-    // Verify cryptographically signed resolution
-    if (!registry_->verify_resolution_signature(principal, request)) {
-      return coordinator_status_e::invalid_resolution;
-    }
-
-    // Validate resolution bounds
-    if (request.mode.width < 640 || request.mode.width > 7680 ||
-        request.mode.height < 480 || request.mode.height > 4320 ||
-        request.mode.refresh_rate < 30 || request.mode.refresh_rate > 360) {
-      return coordinator_status_e::invalid_resolution;
-    }
-
-    if (request.mode.hdr_capable && ((perms & apollo_permission_flags_e::hdr_allowed) == apollo_permission_flags_e::none)) {
-      return coordinator_status_e::unauthorized;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it != sessions_.end()) {
-      // If an existing session is already in active or prepared state, reject duplicate
-      if (it->second.record.state != session_display_state_e::released) {
-        return coordinator_status_e::invalid_state;
-      }
-    }
-
-    session_entry_t entry;
-    entry.record.session_id = session_id;
-    entry.record.principal = principal;
-    entry.record.server_session_token = server_session_token;
-    entry.record.mode = request.mode;
-    entry.record.state = session_display_state_e::prepared;
-    entry.record.generation = 1;
-    entry.record.app_retained = false;
-
-    sessions_[session_id] = std::move(entry);
+    publish(entries_.at(id));
     return coordinator_status_e::ok;
   }
-
-  coordinator_status_e session_display_coordinator_t::start_streaming_display(const std::string &session_id) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return coordinator_status_e::session_not_found;
+  coordinator_status_e session_display_coordinator_t::cleanup(entry_t &e) {
+    e.record.state = session_display_state_e::restoring;
+    const bool done = recovery_ledger_t::cleanup(*e.obligation);
+    e.record.state = done ? session_display_state_e::released : session_display_state_e::unresolved;
+    if (done) {
+      e.record.allocated_resource.clear();
+      std::lock_guard ledger_lock(ledger_->mutex_);
+      ledger_->entries_.erase(std::remove(ledger_->entries_.begin(), ledger_->entries_.end(), e.obligation), ledger_->entries_.end());
     }
-
-    auto &entry = it->second;
-    if (entry.record.state != session_display_state_e::prepared) {
-      return coordinator_status_e::invalid_state;
-    }
-
-    entry.record.state = session_display_state_e::pending;
-    entry.pending_start = clock_ ? clock_->now() : std::chrono::steady_clock::now();
-    uint64_t current_gen = ++entry.record.generation;
-    auto mode = entry.record.mode;
-
-    // Unlock during provider IO
-    lock.unlock();
-
-    if (!display_provider_) {
-      lock.lock();
-      entry.record.state = session_display_state_e::prepared;
-      return coordinator_status_e::allocation_failed;
-    }
-
-    auto allocated = display_provider_->allocate_display(mode);
-    if (!allocated.has_value()) {
-      lock.lock();
-      if (entry.record.generation == current_gen) {
-        entry.record.state = session_display_state_e::prepared;
-      }
-      return coordinator_status_e::allocation_failed;
-    }
-
-    std::wstring resource_name = allocated.value();
-
-    // Probe display
-    bool probe_ok = display_provider_->probe_display(resource_name);
-    if (!probe_ok) {
-      // Probe failed: rollback allocation immediately
-      bool released = display_provider_->release_display(resource_name);
-      lock.lock();
-      if (entry.record.generation == current_gen) {
-        if (!released) {
-          entry.record.state = session_display_state_e::unresolved;
-          entry.record.allocated_resource = resource_name;
-          unresolved_resources_.push_back(resource_name);
-          display_provider_->on_unresolved_resource(resource_name);
-        } else {
-          entry.record.state = session_display_state_e::prepared;
-        }
-      }
-      return coordinator_status_e::probe_failed;
-    }
-
-    // App start
-    bool app_ok = true;
-    if (app_lifecycle_) {
-      app_ok = app_lifecycle_->start_app(session_id, resource_name);
-    }
-
-    if (!app_ok) {
-      // App start failed: rollback display
-      display_provider_->restore_display(resource_name);
-      bool released = display_provider_->release_display(resource_name);
-      lock.lock();
-      if (entry.record.generation == current_gen) {
-        if (!released) {
-          entry.record.state = session_display_state_e::unresolved;
-          entry.record.allocated_resource = resource_name;
-          unresolved_resources_.push_back(resource_name);
-          display_provider_->on_unresolved_resource(resource_name);
-        } else {
-          entry.record.state = session_display_state_e::prepared;
-        }
-      }
-      return coordinator_status_e::app_start_failed;
-    }
-
-    lock.lock();
-    if (entry.record.generation != current_gen) {
-      // Cancelled during startup! Rollback
-      lock.unlock();
-      display_provider_->restore_display(resource_name);
-      display_provider_->release_display(resource_name);
-      return coordinator_status_e::timeout;
-    }
-
-    entry.record.allocated_resource = resource_name;
-    entry.record.state = session_display_state_e::streaming;
-    return coordinator_status_e::ok;
+    else { try { display_->on_unresolved_resource(e.obligation->resource); } catch (...) {} }
+    publish(e);
+    return done ? coordinator_status_e::ok : coordinator_status_e::unresolved_resource;
   }
-
-  size_t session_display_coordinator_t::check_pending_timeouts() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto now = clock_ ? clock_->now() : std::chrono::steady_clock::now();
-    size_t timed_out_count = 0;
-
-    for (auto &pair : sessions_) {
-      auto &entry = pair.second;
-      if (entry.record.state == session_display_state_e::pending) {
-        if (now - entry.pending_start >= pending_timeout_) {
-          timed_out_count++;
-          entry.record.generation++; // Invalidate pending callbacks
-          auto res = entry.record.allocated_resource;
-          entry.record.allocated_resource.clear();
-          entry.record.state = session_display_state_e::prepared;
-
-          if (!res.empty() && display_provider_) {
-            lock.unlock();
-            display_provider_->restore_display(res);
-            bool rel = display_provider_->release_display(res);
-            lock.lock();
-            if (!rel) {
-              entry.record.state = session_display_state_e::unresolved;
-              entry.record.allocated_resource = res;
-              unresolved_resources_.push_back(res);
-              display_provider_->on_unresolved_resource(res);
-            }
+  coordinator_status_e session_display_coordinator_t::start_session(const std::string &id, uint64_t generation) {
+    std::lock_guard lock(operations_);
+    auto e = find(id, generation);
+    if (!e || e->record.state != session_display_state_e::prepared) { return coordinator_status_e::invalid_state; }
+    try {
+      e->started = clock_->now();
+      auto allocation = display_->allocate_display(e->record.mode);
+      if (!allocation || allocation->empty()) { cleanup(*e); return coordinator_status_e::allocation_failed; }
+      // noexcept move into pre-registered ownership BEFORE any fallible snapshot copy.
+      e->obligation->resource = std::move(*allocation);
+      e->obligation->allocation = true; e->obligation->topology = true;
+      e->record.allocated_resource = e->obligation->resource;
+      e->record.state = session_display_state_e::pending;
+      publish(*e);
+      return finish(*e);
+    } catch (...) { cleanup(*e); return coordinator_status_e::allocation_failed; }
+  }
+  coordinator_status_e session_display_coordinator_t::finish(entry_t &e) {
+    coordinator_status_e failure = coordinator_status_e::probe_failed;
+    try {
+      if (clock_->now() - e.started >= timeout_) { failure = coordinator_status_e::timeout; }
+      else {
+        auto status = display_->publication(e.obligation->resource);
+        if (status == publication_e::pending) { return coordinator_status_e::ok; }
+        if (status == publication_e::ready && display_->probe_display(e.obligation->resource)) {
+          failure = coordinator_status_e::app_start_failed;
+          if (e.action == action_e::launch) {
+            e.obligation->app_live = true; // even a throwing start may have created a process
+            if (!app_->start_app(e.record.session_id, e.obligation->resource)) { cleanup(e); return failure; }
           }
+          e.record.state = session_display_state_e::streaming; publish(e); return coordinator_status_e::ok;
         }
       }
-    }
-    return timed_out_count;
+    } catch (...) {}
+    cleanup(e); return failure;
   }
-
-  coordinator_status_e session_display_coordinator_t::on_stream_disconnected(const std::string &session_id, bool app_retained) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return coordinator_status_e::session_not_found;
-    }
-
-    auto &entry = it->second;
-    if (entry.record.state != session_display_state_e::streaming) {
-      return coordinator_status_e::invalid_state;
-    }
-
-    if (app_retained) {
-      entry.record.state = session_display_state_e::app_retained;
-      entry.record.app_retained = true;
-      // Do not release or restore: keep display allocated
-      return coordinator_status_e::ok;
-    } else {
-      // Normal stop
-      mutex_.unlock();
-      auto res = stop_session(session_id);
-      mutex_.lock();
-      return res;
-    }
+  coordinator_status_e session_display_coordinator_t::poll_session(const std::string &id, uint64_t generation) {
+    std::lock_guard lock(operations_);
+    auto e = find(id, generation);
+    return e && e->record.state == session_display_state_e::pending ? finish(*e) : coordinator_status_e::invalid_state;
   }
-
-  coordinator_status_e session_display_coordinator_t::resume_streaming(
-    const std::string &session_id,
-    const std::string &server_session_token
-  ) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return coordinator_status_e::session_not_found;
-    }
-
-    auto &entry = it->second;
-    if (entry.record.server_session_token != server_session_token) {
-      return coordinator_status_e::unauthorized;
-    }
-
-    if (entry.record.state != session_display_state_e::app_retained) {
-      return coordinator_status_e::invalid_state;
-    }
-
-    // Reuse existing allocation
-    entry.record.state = session_display_state_e::streaming;
-    entry.record.app_retained = false;
-    return coordinator_status_e::ok;
+  coordinator_status_e session_display_coordinator_t::stop_session(const std::string &id, uint64_t generation) {
+    std::lock_guard lock(operations_);
+    auto e = find(id, generation);
+    return e ? cleanup(*e) : coordinator_status_e::invalid_state;
   }
-
-  coordinator_status_e session_display_coordinator_t::stop_session(const std::string &session_id) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return coordinator_status_e::session_not_found;
-    }
-
-    auto &entry = it->second;
-    if (entry.record.state != session_display_state_e::streaming &&
-        entry.record.state != session_display_state_e::app_retained &&
-        entry.record.state != session_display_state_e::pending) {
-      return coordinator_status_e::invalid_state;
-    }
-
-    entry.record.state = session_display_state_e::restoring;
-    entry.record.generation++;
-    std::wstring resource = entry.record.allocated_resource;
-
-    lock.unlock();
-
-    // 1. Stop and join application
-    if (app_lifecycle_) {
-      app_lifecycle_->stop_and_join_app(session_id);
-    }
-
-    bool restore_ok = true;
-    bool release_ok = true;
-
-    if (!resource.empty() && display_provider_) {
-      // 2. Restore display topology
-      restore_ok = display_provider_->restore_display(resource);
-      // 3. Release display
-      release_ok = display_provider_->release_display(resource);
-    }
-
-    lock.lock();
-    if (!restore_ok || !release_ok) {
-      entry.record.state = session_display_state_e::unresolved;
-      unresolved_resources_.push_back(resource);
-      if (display_provider_) {
-        display_provider_->on_unresolved_resource(resource);
-      }
-      return coordinator_status_e::unresolved_resource;
-    }
-
-    entry.record.allocated_resource.clear();
-    entry.record.state = session_display_state_e::released;
-    return coordinator_status_e::ok;
+  coordinator_status_e session_display_coordinator_t::app_exit(const std::string &id, uint64_t generation) { return stop_session(id, generation); }
+  coordinator_status_e session_display_coordinator_t::disconnect_session(const std::string &id, uint64_t generation, bool retain) {
+    std::lock_guard lock(operations_);
+    auto e = find(id, generation);
+    if (!e) { return coordinator_status_e::invalid_state; }
+    if (retain && e->record.state == session_display_state_e::streaming && e->obligation->app_live) { e->record.state = session_display_state_e::app_retained; publish(*e); return coordinator_status_e::ok; }
+    return cleanup(*e);
   }
-
-  bool session_display_coordinator_t::handle_late_callback(
-    const std::string &session_id,
-    uint64_t generation,
-    std::function<void()> cb
-  ) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return false;
+  coordinator_status_e session_display_coordinator_t::close() {
+    std::lock_guard lock(operations_);
+    auto result = coordinator_status_e::ok;
+    for (auto &[id, e] : entries_) {
+      (void)id;
+      try { if (cleanup(e) != coordinator_status_e::ok) { result = coordinator_status_e::unresolved_resource; } }
+      catch (...) { result = coordinator_status_e::unresolved_resource; }
     }
-
-    if (it->second.record.generation != generation) {
-      // Generation mismatch or cancelled
-      return false;
-    }
-
-    if (cb) {
-      cb();
-    }
-    return true;
+    return result;
   }
-
-  void session_display_coordinator_t::cancel_session_operations(const std::string &session_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it != sessions_.end()) {
-      it->second.record.generation++;
-    }
-  }
-
-  coordinator_status_e session_display_coordinator_t::retry_unresolved_restore(const std::string &session_id) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return coordinator_status_e::session_not_found;
-    }
-
-    auto &entry = it->second;
-    if (entry.record.state != session_display_state_e::unresolved) {
-      return coordinator_status_e::invalid_state;
-    }
-
-    std::wstring resource = entry.record.allocated_resource;
-    lock.unlock();
-
-    bool restore_ok = display_provider_ ? display_provider_->restore_display(resource) : false;
-    bool release_ok = display_provider_ ? display_provider_->release_display(resource) : false;
-
-    lock.lock();
-    if (restore_ok && release_ok) {
-      entry.record.allocated_resource.clear();
-      entry.record.state = session_display_state_e::released;
-      // Remove from unresolved list
-      for (auto iter = unresolved_resources_.begin(); iter != unresolved_resources_.end(); ++iter) {
-        if (*iter == resource) {
-          unresolved_resources_.erase(iter);
-          break;
-        }
-      }
-      return coordinator_status_e::ok;
-    }
-
-    return coordinator_status_e::unresolved_resource;
-  }
-
-  std::optional<session_display_record_t> session_display_coordinator_t::get_session(const std::string &session_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) {
-      return std::nullopt;
-    }
-    return it->second.record;
-  }
-
-  std::vector<std::wstring> session_display_coordinator_t::get_unresolved_resources() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return unresolved_resources_;
-  }
-
-  size_t session_display_coordinator_t::get_session_count() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return sessions_.size();
-  }
-
-}  // namespace ares::session
+}
