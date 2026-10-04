@@ -1,0 +1,29 @@
+diff --git a/server_http.hpp b/server_http.hpp
+--- a/server_http.hpp
++++ b/server_http.hpp
+@@ -239,6 +239,9 @@
+       }
+ 
+     public:
++      /// Immutable application context attached by server-side request authorization.
++      std::shared_ptr<const void> authorization_context;
++
+       std::string method, path, query_string, http_version;
+ 
+       Content content;
+@@ -758,7 +761,15 @@
+       });
+     }
+ 
++    /// Authorize every parsed request using its owning connection before routing.
++    /// Returning false means the application has handled or rejected the request.
++    virtual bool authorize_request(const std::shared_ptr<Session> &) {
++      return true;
++    }
++
+     void find_resource(const std::shared_ptr<Session> &session) {
++      if(!authorize_request(session))
++        return;
+       // Upgrade connection
+       if(on_upgrade) {
+         auto it = session->request->header.find("Upgrade");

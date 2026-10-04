@@ -61,8 +61,24 @@ namespace nvhttp {
   }
 
   /**
-   * @brief HTTPS server backend that adds Sunshine's client-certificate verification.
+   * @brief Resolve the current TLS peer against the enabled pairing registry.
+   * @param ssl Handshake-complete TLS connection for the current request.
+   * @return Authorized immutable principal, or null when authorization fails.
    */
+  std::shared_ptr<const client_principal_t> resolve_tls_principal(SSL *ssl);
+
+  /**
+   * @brief Read the server-attached identity of an authorized TLS request.
+   * @param request Request dispatched through the TLS authorization hook.
+   * @return Immutable principal, or null when authorization did not succeed.
+   */
+  std::shared_ptr<const client_principal_t> request_principal(const std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> &request) {
+    if (!request || !request->authorization_context) {
+      return nullptr;
+    }
+    return std::static_pointer_cast<const client_principal_t>(request->authorization_context);
+  }
+  /** @brief HTTPS server backend with per-request paired-client authorization. */
   class SunshineHTTPSServer: public SimpleWeb::ServerBase<SunshineHTTPS> {
   public:
     /**
@@ -81,7 +97,34 @@ namespace nvhttp {
       context.use_private_key_file(private_key_file, boost::asio::ssl::context::pem);
     }
 
-    std::function<int(SSL *)> verify;  ///< Callback that validates a client's TLS certificate after handshake.
+    std::function<std::shared_ptr<const client_principal_t>(SSL *)> verify;  ///< Resolve the TLS peer against current paired-client authorization state.
+
+    /**
+     * @brief Authorize a parsed request using its own TLS connection before routing.
+     * @param session Current request and its owning TLS connection.
+     * @return True when authorized; false after sending a denial response.
+     */
+    bool authorize_request(const std::shared_ptr<Session> &session) override {
+      session->request->authorization_context.reset();
+      if (verify) {
+        session->request->authorization_context = verify(session->connection->socket->native_handle());
+      }
+      if (session->request->authorization_context) {
+        return true;
+      }
+      std::function<void(std::shared_ptr<Response>, std::shared_ptr<Request>)> deny = [this](auto response, auto request) {
+        response->close_connection_after_response = true;
+        if (on_verify_failed) {
+          on_verify_failed(response, request);
+        } else {
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Length", "6");
+          response->write(SimpleWeb::StatusCode::client_error_unauthorized, "DENIED", headers);
+        }
+      };
+      this->write(session, deny);
+      return false;
+    }
     std::function<void(std::shared_ptr<Response>, std::shared_ptr<Request>)> on_verify_failed;  ///< Handler used to return the pairing challenge when client verification fails.
 
   protected:
@@ -198,9 +241,6 @@ namespace nvhttp {
   client_t client_root;  ///< In-memory representation of the paired-client database.
   std::atomic<uint32_t> session_id_counter;  ///< Monotonic counter used to allocate GameStream session IDs.
 
-  // Set by TLS verify callback, read by launch/resume handler (single-threaded HTTPS server)
-  std::string last_verified_client_cert;  ///< Last client certificate accepted by the TLS verify callback.  // NOSONAR(cpp:S5421): intentionally mutable global
-  std::string last_verified_client_name;  ///< Friendly name of last client certificate accepted by the TLS verify callback. // NOSONAR(cpp:S5421): intentionally mutable global
 
   /**
    * @brief Case-insensitive map used for HTTP headers and query parameters.
@@ -361,6 +401,46 @@ namespace nvhttp {
   }
 
   /**
+   * @brief Resolve the current TLS peer against exactly one enabled paired record.
+   * @param ssl Handshake-complete TLS connection for the current request.
+   * @return Immutable principal, or null when verification or registry matching fails.
+   */
+  std::shared_ptr<const client_principal_t> resolve_tls_principal(SSL *ssl) {
+    if (!ssl || !SSL_is_init_finished(ssl)) {
+      return {};
+    }
+    crypto::x509_t peer {
+#if OPENSSL_VERSION_MAJOR >= 3
+      SSL_get1_peer_certificate(ssl)
+#else
+      SSL_get_peer_certificate(ssl)
+#endif
+    };
+    if (!peer) {
+      return {};
+    }
+    std::lock_guard lock {client_auth_mutex()};
+    if (verify_client_certificate(peer.get())) {
+      return {};
+    }
+    const auto pem = crypto::pem(peer);
+    const named_cert_t *matched = nullptr;
+    for (const auto &candidate : client_root.named_devices) {
+      if (candidate.cert != pem) {
+        continue;
+      }
+      if (matched || !candidate.enabled) {
+        return {};
+      }
+      matched = &candidate;
+    }
+    if (!matched) {
+      return {};
+    }
+    return std::make_shared<client_principal_t>(client_principal_t {pem, matched->name});
+  }
+
+  /**
    * @brief Load state from its backing store.
    */
   void load_state() {
@@ -471,9 +551,10 @@ namespace nvhttp {
    *
    * @param host_audio Host audio.
    * @param args Arguments forwarded to the callable or parser.
+   * @param principal Immutable identity authorized for this TLS request.
    * @return Constructed launch session object.
    */
-  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, const args_t &args) {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, const args_t &args, const client_principal_t &principal) {
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
@@ -517,8 +598,8 @@ namespace nvhttp {
       launch_session->rtsp_iv_counter = 0;
     }
     launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
-    launch_session->client_cert = last_verified_client_cert;
-    launch_session->client_name = last_verified_client_name;
+    launch_session->client_cert = principal.cert;
+    launch_session->client_name = principal.name;
 
     // Generate the unique identifiers for this connection that we will send later during RTSP handshake
     unsigned char raw_payload[8];
@@ -1382,7 +1463,14 @@ namespace nvhttp {
     }
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    auto launch_session = make_launch_session(host_audio, args);
+    const auto principal = request_principal(request);
+    if (!principal) {
+      tree.put("root.gamesession", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "Client identity is not authorized");
+      return;
+    }
+    auto launch_session = make_launch_session(host_audio, args, *principal);
 
     if (rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
@@ -1497,7 +1585,14 @@ namespace nvhttp {
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
-    const auto launch_session = make_launch_session(host_audio, args);
+    const auto principal = request_principal(request);
+    if (!principal) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "Client identity is not authorized");
+      return;
+    }
+    const auto launch_session = make_launch_session(host_audio, args, *principal);
 
     if (no_active_sessions) {
       // We want to prepare display only if there are no active sessions at
@@ -1634,51 +1729,7 @@ namespace nvhttp {
     http_server_t http_server;
 
     // Verify certificates after establishing connection
-    https_server.verify = [](SSL *ssl) {
-      crypto::x509_t x509 {
-#if OPENSSL_VERSION_MAJOR >= 3
-        SSL_get1_peer_certificate(ssl)
-#else
-        SSL_get_peer_certificate(ssl)
-#endif
-      };
-      if (!x509) {
-        BOOST_LOG(info) << "unknown -- denied"sv;
-        return 0;
-      }
-
-      int verified = 0;
-
-      auto fg = util::fail_guard([&]() {
-        char subject_name[256];
-
-        X509_NAME_oneline(X509_get_subject_name(x509.get()), subject_name, sizeof(subject_name));
-
-        BOOST_LOG(debug) << subject_name << " -- "sv << (verified ? "verified"sv : "denied"sv);
-      });
-
-      std::lock_guard lock {client_auth_mutex()};
-      auto err_str = verify_client_certificate(x509.get());
-      if (err_str) {
-        BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
-
-        return verified;
-      }
-
-      // Check if this client is enabled
-      auto pem = crypto::pem(x509);
-      auto [enabled, client_name] = get_client_status(pem);
-      if (!enabled) {
-        BOOST_LOG(info) << "Client is disabled -- denied"sv;
-        return verified;
-      }
-
-      last_verified_client_cert = pem;
-      last_verified_client_name = client_name;
-      verified = 1;
-
-      return verified;
-    };
+    https_server.verify = resolve_tls_principal;
 
     https_server.on_verify_failed = [](resp_https_t resp, req_https_t req) {
       pt::ptree tree;
@@ -1884,3 +1935,31 @@ namespace nvhttp {
   }  // namespace test_support
 #endif
 }  // namespace nvhttp
+
+
+#ifdef SUNSHINE_TESTS
+namespace nvhttp::test_support {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_request_launch_session(const std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> &request) {
+    const auto principal = request_principal(request);
+    if (!principal) {
+      return {};
+    }
+    return make_launch_session(false, request->parse_query_string(), *principal);
+  }
+
+  std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> make_authorized_https_server(
+      const std::string &certificate, const std::string &key, bool install_resolver) {
+    auto server = std::make_shared<SunshineHTTPSServer>(certificate, key);
+    if (install_resolver) {
+      server->verify = resolve_tls_principal;
+    }
+    server->on_verify_failed = [](resp_https_t resp, req_https_t req) {
+      resp->close_connection_after_response = true;
+      SimpleWeb::CaseInsensitiveMultimap hh;
+      hh.emplace("Content-Length", "6");
+      resp->write(SimpleWeb::StatusCode::client_error_unauthorized, "DENIED", hh);
+    };
+    return server;
+  }
+}
+#endif

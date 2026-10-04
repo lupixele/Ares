@@ -24,6 +24,10 @@
 // local includes
 #include "crypto.h"
 
+namespace rtsp_stream {
+  struct launch_session_t;
+}
+
 /**
  * @brief Contains all the functions and variables related to the nvhttp (GameStream) server.
  */
@@ -362,11 +366,36 @@ namespace nvhttp {
    */
   void erase_all_clients();
 
-#ifdef SUNSHINE_TESTS
+  /** @brief Immutable identity resolved from the current server pairing registry. */
+  struct client_principal_t {
+    const std::string cert;  ///< Exact paired certificate, never a request argument.
+    const std::string name;  ///< Current server-owned friendly name.
+  };
+
   /**
-   * @brief Test-only accessors for paired-client authorization state.
+   * @brief Read the server-attached identity of an authorized TLS request.
+   * @param request Parsed request from the HTTPS backend.
+   * @return Immutable paired identity, or null when authorization was not performed.
    */
+  std::shared_ptr<const client_principal_t> request_principal(const std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> &request);
+
+#ifdef SUNSHINE_TESTS
+  /** @brief Test-only accessors for paired-client authorization state. */
   namespace test_support {
+    /**
+     * @brief Construct the production TLS authorization backend for loopback integration tests.
+     * @param certificate Test server certificate file.
+     * @param key Test server private key file.
+     * @param install_resolver Whether to install the production resolver (false tests fail-closed configuration).
+     * @return Production backend without host endpoints or device initialization.
+     */
+    std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> make_authorized_https_server(const std::string &certificate, const std::string &key, bool install_resolver = true);
+    /**
+     * @brief Exercise production launch-session construction with an authorized TLS request.
+     * @param request Request carrying server-owned authorization context and protocol arguments.
+     * @return Constructed session, or null when the request has no authorized identity.
+     */
+    std::shared_ptr<rtsp_stream::launch_session_t> make_request_launch_session(const std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> &request);
     /**
      * @brief Dispatch a plain-HTTP pairing request through the production handler.
      *
