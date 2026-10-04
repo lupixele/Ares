@@ -335,6 +335,27 @@ namespace nvhttp {
   bool unpair_client(std::string_view uuid);
 
   /**
+   * @brief Add authorized client data.
+   *
+   * A completed pairing replaces all records with the same exact X.509 identity so legacy duplicate records cannot make the newly paired client fail authorization.
+   * Existing permissions and enabled state are preserved when re-pairing an existing certificate to prevent unauthorized privilege escalation or reactivation.
+   *
+   * @param name Human-readable name to assign.
+   * @param cert Certificate data or object used by the operation.
+   * @return Persistent UUID for the added client, or an empty string when the certificate is invalid.
+   */
+  std::string add_authorized_client(const std::string &name, std::string &&cert);
+
+  /**
+   * @brief Add authorized client data with lvalue certificate.
+   *
+   * @param name Human-readable name to assign.
+   * @param cert Certificate data or object used by the operation.
+   * @return Persistent UUID for the added client, or an empty string when the certificate is invalid.
+   */
+  std::string add_authorized_client(const std::string &name, const std::string &cert);
+
+  /**
    * @brief Enable or disable a client.
    * @param uuid The UUID of the client.
    * @param enabled Whether the client should be enabled.
@@ -419,10 +440,10 @@ namespace nvhttp {
      * @param name Human-readable client name.
      * @param cert PEM-encoded client certificate.
      * @param enabled Whether the client may connect.
-     * @param perm Permission bitmask granted to the client.
+     * @param perm Optional permission bitmask granted to the client. When omitted, production defaults or preserved permissions are retained.
      * @return Persistent UUID for the added client, or an empty string when invalid.
      */
-    std::string add_client(const std::string &name, std::string cert, bool enabled, crypto::PERM perm = crypto::PERM::_all);
+    std::string add_client(const std::string &name, std::string cert, bool enabled, std::optional<crypto::PERM> perm = std::nullopt);
 
     /**
      * @brief Update permissions for an existing paired client for authorization tests.

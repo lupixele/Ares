@@ -154,10 +154,9 @@ TEST_F(ClientAuthorizationTest, RePairingReplacesDuplicateCertificateIdentity) {
   ASSERT_EQ(nvhttp::get_all_clients().size(), 3);
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(paired_credentials.x509));
 
-  const auto repaired_uuid = nvhttp::test_support::add_client(
+  const auto repaired_uuid = nvhttp::add_authorized_client(
     "repaired",
-    test_utils::certificates::to_crlf_pem(paired_credentials.x509),
-    true
+    test_utils::certificates::to_crlf_pem(paired_credentials.x509)
   );
 
   ASSERT_FALSE(repaired_uuid.empty());
@@ -368,6 +367,10 @@ TEST_F(ClientAuthorizationTest, InvalidNegativeAndNonIntegerValuesFailSafeToNoPe
   const auto cred_float = test_utils::certificates::generate_ca_credentials("Float Client");
   const auto cred_bool = test_utils::certificates::generate_ca_credentials("Bool Client");
   const auto cred_obj = test_utils::certificates::generate_ca_credentials("Obj Client");
+  const auto cred_nested_obj = test_utils::certificates::generate_ca_credentials("Nested Obj Client");
+  const auto cred_arr = test_utils::certificates::generate_ca_credentials("Arr Client");
+  const auto cred_null = test_utils::certificates::generate_ca_credentials("Null Client");
+  const auto cred_quoted_valid = test_utils::certificates::generate_ca_credentials("Quoted Valid Client");
   const auto cred_ovf = test_utils::certificates::generate_ca_credentials("Overflow Client");
 
   nlohmann::json root_json;
@@ -408,6 +411,7 @@ TEST_F(ClientAuthorizationTest, InvalidNegativeAndNonIntegerValuesFailSafeToNoPe
   dev_bool["enabled"] = true;
   dev_bool["perm"] = true;
 
+  // Empty JSON container ({}) yields empty data in Boost PropertyTree -> PERM::_no
   nlohmann::json dev_obj;
   dev_obj["name"] = "Obj";
   dev_obj["cert"] = cred_obj.x509;
@@ -415,6 +419,39 @@ TEST_F(ClientAuthorizationTest, InvalidNegativeAndNonIntegerValuesFailSafeToNoPe
   dev_obj["enabled"] = true;
   dev_obj["perm"] = nlohmann::json::object();
 
+  // Non-empty JSON object ({ "key": 1 }) has children in PropertyTree -> PERM::_no
+  nlohmann::json dev_nested_obj;
+  dev_nested_obj["name"] = "NestedObj";
+  dev_nested_obj["cert"] = cred_nested_obj.x509;
+  dev_nested_obj["uuid"] = "uuid-nested-obj";
+  dev_nested_obj["enabled"] = true;
+  dev_nested_obj["perm"] = nlohmann::json {{"nested", 123}};
+
+  // Empty JSON array ([]) yields empty data in Boost PropertyTree -> PERM::_no
+  nlohmann::json dev_arr;
+  dev_arr["name"] = "Arr";
+  dev_arr["cert"] = cred_arr.x509;
+  dev_arr["uuid"] = "uuid-arr";
+  dev_arr["enabled"] = true;
+  dev_arr["perm"] = nlohmann::json::array();
+
+  // JSON null literal ("perm": null) yields "null" string in PropertyTree -> PERM::_no
+  nlohmann::json dev_null;
+  dev_null["name"] = "Null";
+  dev_null["cert"] = cred_null.x509;
+  dev_null["uuid"] = "uuid-null";
+  dev_null["enabled"] = true;
+  dev_null["perm"] = nullptr;
+
+  // Valid quoted numeric string in JSON is parsed identically by PropertyTree's lexical parser
+  nlohmann::json dev_quoted_valid;
+  dev_quoted_valid["name"] = "QuotedValid";
+  dev_quoted_valid["cert"] = cred_quoted_valid.x509;
+  dev_quoted_valid["uuid"] = "uuid-quoted-valid";
+  dev_quoted_valid["enabled"] = true;
+  dev_quoted_valid["perm"] = "256";
+
+  // Quoted numeric overflow string exceeding uint32 max fails safe to PERM::_no
   nlohmann::json dev_ovf;
   dev_ovf["name"] = "Ovf";
   dev_ovf["cert"] = cred_ovf.x509;
@@ -423,7 +460,8 @@ TEST_F(ClientAuthorizationTest, InvalidNegativeAndNonIntegerValuesFailSafeToNoPe
   dev_ovf["perm"] = "99999999999999999999";
 
   root_json["root"]["named_devices"] = nlohmann::json::array({
-    dev_neg, dev_neg2, dev_text, dev_float, dev_bool, dev_obj, dev_ovf
+    dev_neg, dev_neg2, dev_text, dev_float, dev_bool, dev_obj, dev_nested_obj,
+    dev_arr, dev_null, dev_quoted_valid, dev_ovf
   });
 
   std::ofstream out(config::nvhttp.file_state);
@@ -439,8 +477,165 @@ TEST_F(ClientAuthorizationTest, InvalidNegativeAndNonIntegerValuesFailSafeToNoPe
   EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-float"), crypto::PERM::_no);
   EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-bool"), crypto::PERM::_no);
   EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-obj"), crypto::PERM::_no);
+  EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-nested-obj"), crypto::PERM::_no);
+  EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-arr"), crypto::PERM::_no);
+  EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-null"), crypto::PERM::_no);
   EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-ovf"), crypto::PERM::_no);
+
+  // Valid quoted numeric is parsed correctly by std::from_chars
+  EXPECT_EQ(nvhttp::test_support::get_client_perm("uuid-quoted-valid"), crypto::PERM::input_controller);
 
   // Enabled state remains independent from permissions
   EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(cred_neg.x509));
+}
+
+TEST_F(ClientAuthorizationTest, RePairPreservesRestrictedZeroPermissionsRoundtrip) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Client Zero");
+  const auto initial_uuid = nvhttp::test_support::add_client("Original Zero", creds.x509, true, crypto::PERM::_no);
+  ASSERT_FALSE(initial_uuid.empty());
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(initial_uuid), crypto::PERM::_no);
+
+  // Client re-pairs using the exact certificate via public production nvhttp::add_authorized_client
+  const auto repaired_uuid = nvhttp::add_authorized_client("Renamed Zero", std::string(creds.x509));
+  ASSERT_FALSE(repaired_uuid.empty());
+  EXPECT_NE(repaired_uuid, initial_uuid);
+
+  // Replaced duplicate record with updated name
+  const auto clients = nvhttp::get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["name"], "Renamed Zero");
+  EXPECT_EQ(clients[0]["uuid"], repaired_uuid);
+  EXPECT_EQ(nvhttp::get_cert_by_uuid(repaired_uuid), creds.x509);
+
+  // Restricted zero permissions MUST be preserved, not escalated to _all
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(repaired_uuid), crypto::PERM::_no);
+  EXPECT_EQ(clients[0]["perm"], static_cast<uint32_t>(crypto::PERM::_no));
+
+  // Persistence reload roundtrip
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+
+  const auto reloaded_clients = nvhttp::get_all_clients();
+  ASSERT_EQ(reloaded_clients.size(), 1);
+  EXPECT_EQ(reloaded_clients[0]["name"], "Renamed Zero");
+  EXPECT_EQ(reloaded_clients[0]["uuid"], repaired_uuid);
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(repaired_uuid), crypto::PERM::_no);
+  EXPECT_EQ(reloaded_clients[0]["perm"], static_cast<uint32_t>(crypto::PERM::_no));
+}
+
+TEST_F(ClientAuthorizationTest, RePairPreservesDefaultAndCustomPermissionsRoundtrip) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Client Default");
+  const auto initial_uuid = nvhttp::test_support::add_client("Original Default", creds.x509, true, crypto::PERM::_default);
+  ASSERT_FALSE(initial_uuid.empty());
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(initial_uuid), crypto::PERM::_default);
+
+  // Client re-pairs using the exact certificate via public production nvhttp::add_authorized_client
+  const auto repaired_uuid = nvhttp::add_authorized_client("Renamed Default", std::string(creds.x509));
+  ASSERT_FALSE(repaired_uuid.empty());
+  EXPECT_NE(repaired_uuid, initial_uuid);
+
+  const auto clients = nvhttp::get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["name"], "Renamed Default");
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(repaired_uuid), crypto::PERM::_default);
+
+  // Persistence reload roundtrip
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(repaired_uuid), crypto::PERM::_default);
+}
+
+TEST_F(ClientAuthorizationTest, RePairPreservesDisabledStateWithoutAdminDecisionRoundtrip) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Client Disabled");
+  const auto initial_uuid = nvhttp::test_support::add_client("Original Disabled", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(initial_uuid.empty());
+
+  // Administrator revokes/disables the client
+  ASSERT_TRUE(nvhttp::set_client_enabled(initial_uuid, false));
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+
+  // Disabled client attempts to re-pair with Sunshine via public production nvhttp::add_authorized_client
+  const auto repaired_uuid = nvhttp::add_authorized_client("Renamed Disabled", std::string(creds.x509));
+  ASSERT_FALSE(repaired_uuid.empty());
+  EXPECT_NE(repaired_uuid, initial_uuid);
+
+  const auto clients = nvhttp::get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["name"], "Renamed Disabled");
+  EXPECT_FALSE(clients[0]["enabled"]);
+
+  // Disabled state MUST be preserved; re-pairing cannot reactivate a revoked client
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+
+  // Persistence reload roundtrip
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+
+  const auto reloaded_clients = nvhttp::get_all_clients();
+  ASSERT_EQ(reloaded_clients.size(), 1);
+  EXPECT_FALSE(reloaded_clients[0]["enabled"]);
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+}
+
+TEST_F(ClientAuthorizationTest, FirstPairingDefaultsToFullPermissionsAndEnabled) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("First Pair Client");
+
+  // Pair client for the very first time using public production nvhttp::add_authorized_client
+  const auto uuid = nvhttp::add_authorized_client("Brand New Client", std::string(creds.x509));
+  ASSERT_FALSE(uuid.empty());
+
+  // Legacy default behavior: full permissions and enabled
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+
+  const auto clients = nvhttp::get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["perm"], static_cast<uint32_t>(crypto::PERM::_all));
+  EXPECT_TRUE(clients[0]["enabled"]);
+
+  // Persistence reload roundtrip
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+}
+
+TEST_F(ClientAuthorizationTest, ExactCertificateCompareDistinguishesClientsDuringRePair) {
+  const auto creds_a = test_utils::certificates::generate_ca_credentials("Client A");
+  const auto creds_b = test_utils::certificates::generate_ca_credentials("Client B");
+
+  const auto uuid_a = nvhttp::test_support::add_client("Client A", creds_a.x509, false, crypto::PERM::_no);
+  const auto uuid_b = nvhttp::test_support::add_client("Client B", creds_b.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid_a.empty());
+  ASSERT_FALSE(uuid_b.empty());
+  ASSERT_EQ(nvhttp::get_all_clients().size(), 2);
+
+  // Client A re-pairs using CRLF formatted PEM of its exact certificate
+  const auto crlf_a = test_utils::certificates::to_crlf_pem(creds_a.x509);
+  const auto repaired_a = nvhttp::add_authorized_client("Client A Renamed", crlf_a);
+  ASSERT_FALSE(repaired_a.empty());
+  EXPECT_NE(repaired_a, uuid_a);
+
+  // Still exactly 2 clients
+  const auto clients = nvhttp::get_all_clients();
+  ASSERT_EQ(clients.size(), 2);
+
+  // Client A retained restricted perm and disabled state, updated name
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(repaired_a), crypto::PERM::_no);
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds_a.x509));
+
+  // Client B is completely untouched
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid_b), crypto::PERM::_all);
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds_b.x509));
+
+  // Persistence reload roundtrip
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(repaired_a), crypto::PERM::_no);
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds_a.x509));
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid_b), crypto::PERM::_all);
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds_b.x509));
 }

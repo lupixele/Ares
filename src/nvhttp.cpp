@@ -582,6 +582,7 @@ namespace nvhttp {
    * @brief Add authorized client data.
    *
    * A completed pairing replaces all records with the same exact X.509 identity so legacy duplicate records cannot make the newly paired client fail authorization.
+   * Existing permissions and enabled state are preserved when re-pairing an existing certificate to prevent unauthorized privilege escalation or reactivation.
    *
    * @param name Human-readable name to assign.
    * @param cert Certificate data or object used by the operation.
@@ -600,6 +601,37 @@ namespace nvhttp {
     const auto uuid = named_cert.uuid;
 
     std::lock_guard lock {client_auth_mutex()};
+
+    bool existing_found = false;
+    crypto::PERM existing_perm = crypto::PERM::_all;
+    bool existing_enabled = true;
+
+    for (const auto &existing_client : client_root.named_devices) {
+      auto existing_certificate = crypto::x509(existing_client.cert);
+      if (existing_certificate && X509_cmp(existing_certificate.get(), certificate.get()) == 0) {
+        if (!existing_found) {
+          existing_found = true;
+          existing_perm = existing_client.perm;
+          existing_enabled = existing_client.enabled;
+        } else {
+          // If duplicate records existed for this certificate, fail closed:
+          // preserve disabled state if any record was disabled, and intersect permissions.
+          if (!existing_client.enabled) {
+            existing_enabled = false;
+          }
+          existing_perm = existing_perm & existing_client.perm;
+        }
+      }
+    }
+
+    if (existing_found) {
+      named_cert.perm = existing_perm;
+      named_cert.enabled = existing_enabled;
+    } else {
+      named_cert.perm = crypto::PERM::_all;
+      named_cert.enabled = true;
+    }
+
     std::erase_if(client_root.named_devices, [&certificate](const named_cert_t &existing_client) {
       auto existing_certificate = crypto::x509(existing_client.cert);
       return existing_certificate && X509_cmp(existing_certificate.get(), certificate.get()) == 0;
@@ -611,6 +643,18 @@ namespace nvhttp {
       save_state();
     }
     return uuid;
+  }
+
+  /**
+   * @brief Add authorized client data with lvalue certificate.
+   *
+   * @param name Human-readable name to assign.
+   * @param cert Certificate data or object used by the operation.
+   * @return Persistent UUID for the added client, or an empty string when the certificate is invalid.
+   */
+  std::string add_authorized_client(const std::string &name, const std::string &cert) {
+    auto cert_copy = cert;
+    return add_authorized_client(name, std::move(cert_copy));
   }
 
   /**
@@ -1950,13 +1994,15 @@ namespace nvhttp {
       cert_chain.clear();
     }
 
-    std::string add_client(const std::string &name, std::string cert, bool enabled, crypto::PERM perm) {
+    std::string add_client(const std::string &name, std::string cert, bool enabled, std::optional<crypto::PERM> perm) {
       auto uuid = add_authorized_client(name, std::move(cert));
       if (!uuid.empty()) {
         std::lock_guard lock {client_auth_mutex()};
         for (auto &client : client_root.named_devices) {
           if (client.uuid == uuid) {
-            client.perm = perm;
+            if (perm.has_value()) {
+              client.perm = *perm;
+            }
             if (!enabled) {
               client.enabled = false;
             }

@@ -49,8 +49,32 @@ The `enabled` boolean flag in `named_cert_t` represents whether a client certifi
    Persisted records in `sunshine_state.json` without an explicit `"perm"` field default to `crypto::PERM::_all` (`119480064`). This ensures existing paired clients retain full access upon upgrading and are never locked out.
 2. **Unknown Bits Stripping**:
    Persisted values are masked against `crypto::PERM::_all` (`0x071F1F00`) to strip unknown bits while preserving recognized permissions.
-3. **Fail-Safe Input Validation**:
-   Invalid negative integers (e.g. `-1`), non-integer values (text, floating point, boolean, objects, arrays), or values overflowing `uint32_t` log a visible error via `BOOST_LOG(error)` and fail safe to `crypto::PERM::_no` (`0`). They never silently default to full permissions.
+3. **PropertyTree Lexical Validation and Fail-Safe Schema Enforcement**:
+   - Sunshine parses persisted state using Boost PropertyTree (`boost::property_tree::read_json`), which treats all scalar JSON values as untyped lexical strings stored in `ptree::data()`. Consequently, PropertyTree cannot differentiate between a quoted numeric string (`"256"`) and an unquoted JSON numeric literal (`256`), nor between booleans, null literals, and textual strings.
+   - The parser intentionally uses `std::from_chars` rather than `boost::lexical_cast` to enforce strict numeric boundaries without throwing exceptions.
+   - **Containers (Objects / Arrays)**: Non-empty JSON objects (`{"nested": 1}`) and non-empty arrays (`[1, 2]`) contain child nodes in PropertyTree (`!perm_node->empty()`). These are detected and fail safe to `crypto::PERM::_no` (`0`). Empty JSON containers (`{}` and `[]`) have no child nodes and empty data strings (`perm_node->data().empty()`), failing safe to `crypto::PERM::_no`.
+   - **Null Literals and Text**: JSON `null` literals are loaded as the string `"null"`. Non-integer text and `null` fail `std::from_chars` parsing and fail safe to `crypto::PERM::_no`.
+   - **Negative Integers**: Any string with a leading `-` (e.g. `-1` or `"-256"`) is rejected and fails safe to `crypto::PERM::_no`.
+   - **Floating Point Numbers**: Floating point values (e.g. `12.34`) are rejected because `std::from_chars` does not consume the fractional component (`ptr != end`), failing safe to `crypto::PERM::_no`.
+   - **Numeric Overflow**: Quoted or unquoted numeric strings exceeding `std::numeric_limits<uint32_t>::max()` (e.g. `"4294967296"` or `"99999999999999999999"`) fail `val > max` or `std::errc::result_out_of_range` checks and fail safe to `crypto::PERM::_no`.
+   - **Valid Quoted/Unquoted Numbers**: Valid numeric representations within 32-bit range (e.g. `256` or `"256"`) are parsed identically and masked with `_all`.
+
+## Re-Pairing Lifecycle and Privilege Preservation
+
+1. **Exact Certificate Deduplication**:
+   When a client pairs with Sunshine, `add_authorized_client()` parses the client certificate and compares it against all registered clients using OpenSSL's `X509_cmp()`. This matches exact certificate identity across formatting differences (such as CRLF vs LF newlines). Any duplicate records matching the certificate are removed.
+2. **Preserving Permissions on Re-Pair**:
+   Re-pairing with the same certificate MUST NOT escalate a client's privileges. If an existing record exists for the certificate, its existing permission bitmask (`perm`) is preserved during re-pairing. For example, a client restricted to `crypto::PERM::_no` (0) or `crypto::PERM::_default` retains its restricted permissions. First-time pairings (a certificate not currently registered) default to full permissions (`crypto::PERM::_all`).
+3. **Preserving Disabled Status on Re-Pair**:
+   If an administrator disabled a client (`enabled == false`), re-pairing the same certificate preserves the disabled status. Re-pairing cannot re-enable a revoked or disabled client without an explicit administrative action in the Sunshine Web UI or configuration file. In legacy corrupt states containing multiple duplicate records, if any duplicate record was disabled, the preserved state remains disabled (`enabled == false`), and permissions are intersected.
+4. **Friendly Name Updates**:
+   When re-pairing an existing certificate with a new client name, the updated name is applied to the client record while preserving permissions and disabled status.
+5. **UUID Identity Lifecycle Assessment**:
+   Upstream Sunshine (PR #5737 / commit `0daeb0e3`) generates a new UUID upon completed re-pairing (`named_cert.uuid = uuid_util::uuid_t::generate().string()`). Analysis of Moonlight clients and existing tests reveals:
+   - Moonlight client devices do not receive, store, or rely on Sunshine's internal UUID.
+   - Sunshine's administrative Web UI tracks paired clients by UUID.
+   - Existing test fixtures (`ClientAuthorizationTest.RePairingReplacesDuplicateCertificateIdentity`) explicitly verify that re-pairing generates a new UUID (`EXPECT_NE(repaired_uuid, original_uuid)`) to cleanly replace duplicate or stale registry records.
+   - Preserving permissions and enabled status while generating a new UUID ensures administrative security policies are honored without breaking upstream UUID lifecycle conventions or existing test assertions.
 
 ## Per-Request TLS Principal Snapshot
 
