@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -216,6 +217,7 @@ namespace nvhttp {
     std::string uuid;  ///< Persistent Moonlight client UUID associated with the certificate.
     std::string cert;  ///< Certificate PEM string or path.
     bool enabled = true;  ///< Whether this persisted client entry may connect.
+    crypto::PERM perm {crypto::PERM::_all};  ///< Client permission bitmask.
   };
 
   /**
@@ -319,6 +321,7 @@ namespace nvhttp {
       named_cert_node.put("cert"s, named_cert.cert);
       named_cert_node.put("uuid"s, named_cert.uuid);
       named_cert_node.put("enabled"s, named_cert.enabled);
+      named_cert_node.put("perm"s, static_cast<uint32_t>(named_cert.perm));
       named_cert_nodes.push_back(std::make_pair(""s, named_cert_node));
     }
     root.add_child("root.named_devices"s, named_cert_nodes);
@@ -437,7 +440,68 @@ namespace nvhttp {
     if (!matched) {
       return {};
     }
-    return std::make_shared<client_principal_t>(client_principal_t {pem, matched->name});
+    return std::make_shared<client_principal_t>(client_principal_t {pem, matched->name, matched->perm});
+  }
+
+  /**
+   * @brief Parse a persisted permission string safely.
+   *
+   * Missing permissions default to full permissions (crypto::PERM::_all) to prevent locking out legacy clients.
+   * Invalid values (negative, non-integer, or unparseable) log a visible error and fail safe to no permissions (crypto::PERM::_no).
+   * Valid integers are masked against crypto::PERM::_all to strip unknown bits.
+   *
+   * @param perm_str Optional string representation of the persisted permission value.
+   * @param client_id Identifier (name or UUID) for diagnostic logging.
+   * @return Resolved permission mask.
+   */
+  crypto::PERM parse_persisted_permission(const std::optional<std::string> &perm_str, const std::string_view client_id) {
+    if (!perm_str.has_value()) {
+      return crypto::PERM::_all;
+    }
+
+    const auto &str = *perm_str;
+    if (str.empty()) {
+      BOOST_LOG(error) << "Empty permission string for client ["sv << client_id << "], failing safe to PERM::_no"sv;
+      return crypto::PERM::_no;
+    }
+
+    if (str.front() == '-') {
+      BOOST_LOG(error) << "Invalid negative permission ["sv << str << "] for client ["sv << client_id << "], failing safe to PERM::_no"sv;
+      return crypto::PERM::_no;
+    }
+
+    uint64_t val = 0;
+    const char *begin = str.data();
+    const char *end = begin + str.size();
+    auto [ptr, ec] = std::from_chars(begin, end, val);
+    if (ec != std::errc {} || ptr != end || val > std::numeric_limits<uint32_t>::max()) {
+      BOOST_LOG(error) << "Invalid non-integer or out-of-range permission ["sv << str << "] for client ["sv << client_id << "], failing safe to PERM::_no"sv;
+      return crypto::PERM::_no;
+    }
+
+    const auto masked = static_cast<uint32_t>(val) & static_cast<uint32_t>(crypto::PERM::_all);
+    return static_cast<crypto::PERM>(masked);
+  }
+
+  /**
+   * @brief Parse a persisted permission property tree node safely.
+   *
+   * @param node Property tree node of the client record containing the optional "perm" field.
+   * @param client_id Identifier (name or UUID) for diagnostic logging.
+   * @return Resolved permission mask.
+   */
+  crypto::PERM parse_persisted_permission(const boost::property_tree::ptree &node, const std::string_view client_id) {
+    const auto perm_node = node.get_child_optional("perm");
+    if (!perm_node) {
+      return crypto::PERM::_all;
+    }
+
+    if (!perm_node->empty()) {
+      BOOST_LOG(error) << "Invalid non-integer permission node (object/array) for client ["sv << client_id << "], failing safe to PERM::_no"sv;
+      return crypto::PERM::_no;
+    }
+
+    return parse_persisted_permission(std::optional<std::string>(perm_node->data()), client_id);
   }
 
   /**
@@ -482,6 +546,8 @@ namespace nvhttp {
             named_cert.name = ""s;
             named_cert.cert = el.get_value<std::string>();
             named_cert.uuid = uuid_util::uuid_t::generate().string();
+            named_cert.enabled = true;
+            named_cert.perm = crypto::PERM::_all;
             client.named_devices.emplace_back(named_cert);
           }
         }
@@ -495,6 +561,7 @@ namespace nvhttp {
         named_cert.cert = el.get_child("cert").get_value<std::string>();
         named_cert.uuid = el.get_child("uuid").get_value<std::string>();
         named_cert.enabled = el.get<bool>("enabled", true);
+        named_cert.perm = parse_persisted_permission(el, named_cert.uuid);
         client.named_devices.emplace_back(named_cert);
       }
     }
@@ -1369,6 +1436,7 @@ namespace nvhttp {
       named_cert_node["name"] = named_cert.name;
       named_cert_node["uuid"] = named_cert.uuid;
       named_cert_node["enabled"] = named_cert.enabled;
+      named_cert_node["perm"] = static_cast<uint32_t>(named_cert.perm);
       named_cert_nodes.push_back(named_cert_node);
     }
 
@@ -1882,12 +1950,45 @@ namespace nvhttp {
       cert_chain.clear();
     }
 
-    std::string add_client(const std::string &name, std::string cert, bool enabled) {
+    std::string add_client(const std::string &name, std::string cert, bool enabled, crypto::PERM perm) {
       auto uuid = add_authorized_client(name, std::move(cert));
-      if (!uuid.empty() && !enabled) {
-        set_client_enabled(uuid, false);
+      if (!uuid.empty()) {
+        std::lock_guard lock {client_auth_mutex()};
+        for (auto &client : client_root.named_devices) {
+          if (client.uuid == uuid) {
+            client.perm = perm;
+            if (!enabled) {
+              client.enabled = false;
+            }
+            break;
+          }
+        }
+        rebuild_client_cert_chain();
+        save_state();
       }
       return uuid;
+    }
+
+    bool set_client_perm(const std::string_view uuid, crypto::PERM perm) {
+      std::lock_guard lock {client_auth_mutex()};
+      for (auto &client : client_root.named_devices) {
+        if (client.uuid == uuid) {
+          client.perm = perm;
+          save_state();
+          return true;
+        }
+      }
+      return false;
+    }
+
+    crypto::PERM get_client_perm(const std::string_view uuid) {
+      std::lock_guard lock {client_auth_mutex()};
+      for (const auto &client : client_root.named_devices) {
+        if (client.uuid == uuid) {
+          return client.perm;
+        }
+      }
+      return crypto::PERM::_no;
     }
 
     bool duplicate_client(const std::string_view uuid) {

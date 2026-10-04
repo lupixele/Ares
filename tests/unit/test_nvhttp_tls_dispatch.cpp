@@ -234,6 +234,11 @@ protected:
       response->write(session ? session->client_name : "MISSING PRINCIPAL REACHED ENDPOINT");
     };
 
+    server->resource["^/principal-perm$"]["GET"] = [](auto response, auto request) {
+      const auto principal = nvhttp::request_principal(request);
+      response->write(principal ? std::to_string(static_cast<uint32_t>(principal->perm)) : "MISSING PRINCIPAL REACHED ENDPOINT");
+    };
+
     auto listening = std::make_shared<std::promise<unsigned short>>();
     auto ready = listening->get_future();
     worker = std::thread([this, listening]() {
@@ -408,4 +413,40 @@ TEST_F(TLSDispatchTest, LaunchSessionIdentityUsesAuthorizedPrincipal) {
 
   tls_client client(port, &client_creds);
   EXPECT_EQ(client.request("/launch-identity?rikey=0123456789abcdef0123456789abcdef&rikeyid=1&appid=1&client_name=spoof&client_cert=spoof&uniqueid=spoof"), "LaunchClient");
+}
+
+TEST_F(TLSDispatchTest, KeepAliveRequestPrincipalPermissionSnapshotTracksRegistryUpdate) {
+  const auto creds = crypto::gen_creds("TLS Perm Client", 2048);
+  const auto uuid = nvhttp::test_support::add_client("Perm Client", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  tls_client client(port, &creds);
+  EXPECT_EQ(client.request("/principal-perm"), std::to_string(static_cast<uint32_t>(crypto::PERM::_all)));
+
+  // Update permissions in the server pairing registry without closing the TLS connection
+  ASSERT_TRUE(nvhttp::test_support::set_client_perm(uuid, crypto::PERM::_default));
+
+  // The next request on the same keep-alive TLS connection receives the updated permission snapshot
+  EXPECT_EQ(client.request("/principal-perm"), std::to_string(static_cast<uint32_t>(crypto::PERM::_default)));
+}
+
+TEST_F(TLSDispatchTest, PermNoDoesNotDisableClientConnection) {
+  const auto creds = crypto::gen_creds("TLS Perm No Client", 2048);
+  const auto uuid = nvhttp::test_support::add_client("PermNoClient", creds.x509, true, crypto::PERM::_no);
+  ASSERT_FALSE(uuid.empty());
+
+  tls_client client(port, &creds);
+  // Client is enabled, so TLS handshake and dispatch succeed, reflecting snapshot with perm == 0
+  EXPECT_EQ(client.request("/principal-perm"), "0");
+  EXPECT_EQ(client.request("/identity"), "PermNoClient");
+}
+
+TEST_F(TLSDispatchTest, DisabledClientCannotConnectRegardlessOfPermissions) {
+  const auto creds = crypto::gen_creds("TLS Disabled Full Perm Client", 2048);
+  const auto uuid = nvhttp::test_support::add_client("DisabledFullPerm", creds.x509, false, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  tls_client client(port, &creds);
+  // Client is disabled, so authorization fails closed despite having PERM::_all
+  EXPECT_EQ(client.request("/principal-perm"), "DENIED");
 }

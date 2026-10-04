@@ -370,6 +370,7 @@ namespace nvhttp {
   struct client_principal_t {
     const std::string cert;  ///< Exact paired certificate, never a request argument.
     const std::string name;  ///< Current server-owned friendly name.
+    const crypto::PERM perm;  ///< Immutable permission snapshot captured from current registry.
   };
 
   /**
@@ -418,9 +419,27 @@ namespace nvhttp {
      * @param name Human-readable client name.
      * @param cert PEM-encoded client certificate.
      * @param enabled Whether the client may connect.
+     * @param perm Permission bitmask granted to the client.
      * @return Persistent UUID for the added client, or an empty string when invalid.
      */
-    std::string add_client(const std::string &name, std::string cert, bool enabled);
+    std::string add_client(const std::string &name, std::string cert, bool enabled, crypto::PERM perm = crypto::PERM::_all);
+
+    /**
+     * @brief Update permissions for an existing paired client for authorization tests.
+     *
+     * @param uuid Persistent client UUID.
+     * @param perm New permission bitmask.
+     * @return `true` if client was found and updated.
+     */
+    bool set_client_perm(std::string_view uuid, crypto::PERM perm);
+
+    /**
+     * @brief Get client permissions by UUID for authorization tests.
+     *
+     * @param uuid Client UUID being looked up.
+     * @return Permission bitmask for the paired client, or PERM::_no when unknown.
+     */
+    crypto::PERM get_client_perm(std::string_view uuid);
 
     /**
      * @brief Duplicate a paired-client record to simulate legacy conflicting state.
