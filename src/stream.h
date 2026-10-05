@@ -15,6 +15,10 @@
 #include "crypto.h"
 #include "video.h"
 
+namespace input {
+  struct input_t;
+}
+
 namespace stream {
   constexpr auto VIDEO_STREAM_PORT = 9;  ///< GameStream base-port offset used for the video UDP stream.
   constexpr auto CONTROL_PORT = 10;  ///< GameStream base-port offset used for the control channel.
@@ -94,5 +98,26 @@ namespace stream {
      * @return PEM certificate associated with the session's client.
      */
     const std::string &client_cert(session_t &session);
+    /**
+     * @brief Get the retained input session identifier for a stream session.
+     *
+     * @param session Active streaming session.
+     * @return Retained input identity.
+     */
+    const std::string &input_session_id(session_t &session);
+    /**
+     * @brief Get the platform input context for a stream session.
+     *
+     * @param session Active streaming session.
+     * @return Shared input context pointer, or nullptr if not allocated.
+     */
+    std::shared_ptr<input::input_t> input(session_t &session);
+    /**
+     * @brief Get the immutable permission snapshot captured for a stream session.
+     *
+     * @param session Active streaming session.
+     * @return Captured permission mask.
+     */
+    crypto::PERM permissions(session_t &session);
   }  // namespace session
 }  // namespace stream

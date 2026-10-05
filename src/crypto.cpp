@@ -404,6 +404,37 @@ namespace crypto {
   }
 
   /**
+   * @brief Calculate the SHA-256 fingerprint of an X.509 certificate.
+   */
+  std::string cert_fingerprint(const x509_t &cert) {
+    if (!cert) {
+      return {};
+    }
+
+    std::array<unsigned char, SHA256_DIGEST_LENGTH> md;
+    unsigned int len = 0;
+    if (X509_digest(cert.get(), EVP_sha256(), md.data(), &len) != 1 || len != SHA256_DIGEST_LENGTH) {
+      return {};
+    }
+
+    return util::hex_vec(md.begin(), md.end(), true);
+  }
+
+  /**
+   * @brief Calculate the SHA-256 fingerprint of a PEM-encoded certificate.
+   */
+  std::string cert_fingerprint(const std::string_view &cert_pem) {
+    if (cert_pem.empty()) {
+      return {};
+    }
+    auto cert = x509(cert_pem);
+    if (!cert) {
+      return {};
+    }
+    return cert_fingerprint(cert);
+  }
+
+  /**
    * @brief Return the certificate signature bytes.
    */
   std::string_view signature(const x509_t &x) {

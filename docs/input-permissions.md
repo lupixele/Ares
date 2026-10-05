@@ -2,7 +2,19 @@
 
 ## Overview
 
-This slice adds an input-ingress permission gate and tests the actual queue and keyboard processor. It is not yet wired to authenticated streaming-session permissions: existing stream callers still allocate the default full-input mask. No live permission-revocation or certificate-bound retained-context guarantee is claimed by this slice.
+This slice wires authenticated streaming-session permissions and certificate-derived identity retention:
+- `nvhttp::make_launch_session` sets the session permission snapshot directly from the authenticated `client_principal_t` (TLS peer certificate matched against server pairing registry).
+- `rtsp_stream::launch_session_t` stores the permission bitmask (defaulting backwards-compatibly to `crypto::PERM::_all`).
+- `stream::session::alloc` captures this immutable permission snapshot, computes a cryptographically safe identity key using the SHA-256 certificate fingerprint (`crypto::cert_fingerprint`), and allocates input via `input::alloc` with the captured mask and fingerprint. Client-supplied query keys such as `uniqueid` are never trusted for retained identity.
+- On reconnect/resume with unchanged permissions, the retained session is reused. If permissions in the pairing registry change during an active session or before resume, the resume allocation fails closed (`nullptr`) and returns HTTP 500 without silently escalating permissions or concurrently terminating the old active context.
+- Control channel input callbacks (`IDX_INPUT_DATA` and `IDX_ENCRYPTED`) enforce the allocated context gate using the captured immutable permission mask.
+
+## Security Scope & Limitations (Honest Assessment)
+
+- **No Live Revocation**: Permission changes in the pairing registry while a stream is running DO NOT dynamically revoke privileges on the active stream; the active stream continues operating with its initial snapshot until disconnection.
+- **No Endpoint Action Gating Yet**: Per-endpoint action enforcement (such as gating specific HTTP actions like app listing or launching) remains a separate stage.
+- **Fail-Closed on Permission Conflict**: A resumed connection with a permission mismatch fails closed orderly, requiring explicit session reset before reuse.
+- **No Secure-Full Claim**: This integration does not claim complete, end-to-end active revocation. Full revocation requires cooperative stream termination and input queue draining upon admin permission modification.
 
 ## Input Permission Bitmask Domains
 

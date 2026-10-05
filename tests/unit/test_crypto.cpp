@@ -63,3 +63,18 @@ TEST(CryptoTest, CertificateChainRequiresExactPairedIdentity) {
   EXPECT_EQ(certificate_chain.verify(paired_certificate.get()), nullptr);
   EXPECT_NE(certificate_chain.verify(derived_certificate.get()), nullptr);
 }
+
+TEST(CryptoTest, CertificateFingerprintMatchesSha256Digest) {
+  const auto creds = crypto::gen_creds("Fingerprint Test", 2048);
+  const auto fp1 = crypto::cert_fingerprint(creds.x509);
+  EXPECT_FALSE(fp1.empty());
+  EXPECT_EQ(fp1.size(), 64u);
+
+  auto cert = crypto::x509(creds.x509);
+  const auto fp2 = crypto::cert_fingerprint(cert);
+  EXPECT_EQ(fp1, fp2);
+
+  // Invalid or empty cert returns empty
+  EXPECT_TRUE(crypto::cert_fingerprint("").empty());
+  EXPECT_TRUE(crypto::cert_fingerprint("not a certificate").empty());
+}

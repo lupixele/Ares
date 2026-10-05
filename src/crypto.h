@@ -243,6 +243,32 @@ namespace crypto {
   std::string pem(pkey_t &pkey);
 
   /**
+   * @brief Calculate the SHA-256 fingerprint of an X.509 certificate.
+   *
+   * @param cert X.509 certificate object.
+   * @return Hexadecimal SHA-256 fingerprint string, or empty string on failure.
+   */
+  std::string cert_fingerprint(const x509_t &cert);
+
+  /**
+   * @brief Calculate the SHA-256 fingerprint of a PEM-encoded certificate.
+   *
+   * @param cert_pem PEM-encoded certificate data.
+   * @return Hexadecimal SHA-256 fingerprint string, or empty string on failure.
+   */
+  std::string cert_fingerprint(const std::string_view &cert_pem);
+
+  /**
+   * @brief Calculate the SHA-256 fingerprint of a PEM-encoded certificate.
+   *
+   * @param cert_pem Null-terminated C string containing PEM-encoded certificate data.
+   * @return Hexadecimal SHA-256 fingerprint string, or empty string on failure.
+   */
+  inline std::string cert_fingerprint(const char *cert_pem) {
+    return cert_fingerprint(cert_pem ? std::string_view {cert_pem} : std::string_view {});
+  }
+
+  /**
    * @brief Sign data with SHA-256.
    *
    * @param pkey Private key PEM data or private key file path.

@@ -553,6 +553,7 @@ namespace stream {
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
     std::string client_cert;  ///< PEM certificate for the paired client owning the stream.
     std::string input_session_id;  ///< Stable client identity used to retain input devices across resume.
+    crypto::PERM permissions {crypto::PERM::_all};  ///< Immutable client permission snapshot captured at stream allocation.
 
     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
     safe::signal_t controlEnd;  ///< Signal raised when the control channel exits.
@@ -1232,7 +1233,9 @@ namespace stream {
         std::copy(payload.end() - 16, payload.end(), std::begin(iv));
       }
 
-      input::passthrough(session->input, std::move(plaintext));
+      if (session->input) {
+        input::passthrough(session->input, std::move(plaintext), session->permissions);
+      }
     });
 
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
@@ -1295,7 +1298,9 @@ namespace stream {
       // IDX_INPUT_DATA callback will attempt to decrypt unencrypted data, therefore we need pass it directly
       if (type == packetTypes[IDX_INPUT_DATA]) {
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
-        input::passthrough(session->input, std::move(plaintext));
+        if (session->input) {
+          input::passthrough(session->input, std::move(plaintext), session->permissions);
+        }
       } else {
         server->call(type, session, next_payload, true);
       }
@@ -2195,6 +2200,27 @@ namespace stream {
     }
 
     /**
+     * @brief Get the platform input context for a stream session.
+     */
+    std::shared_ptr<input::input_t> input(session_t &session) {
+      return session.input;
+    }
+
+    /**
+     * @brief Get the immutable permission snapshot captured for a stream session.
+     */
+    crypto::PERM permissions(session_t &session) {
+      return session.permissions;
+    }
+
+    /**
+     * @brief Get the retained input session identifier for a stream session.
+     */
+    const std::string &input_session_id(session_t &session) {
+      return session.input_session_id;
+    }
+
+    /**
      * @brief Stop the active streaming session and prevent new packets from being queued.
      */
     void stop(session_t &session) {
@@ -2234,7 +2260,9 @@ namespace stream {
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
       BOOST_LOG(debug) << "Resetting Input..."sv;
-      input::reset(session.input);
+      if (session.input) {
+        input::reset(session.input);
+      }
 
       // If this is the last session, invoke the platform callbacks
       if (--running_sessions == 0) {
@@ -2263,7 +2291,13 @@ namespace stream {
      * @brief Start the audio, video, and control workers for a streaming session.
      */
     int start(session_t &session, const std::string &addr_string) {
-      session.input = input::alloc(session.mail, session.input_session_id);
+      if (!session.input) {
+        session.input = input::alloc(session.mail, session.input_session_id, session.permissions);
+        if (!session.input) {
+          BOOST_LOG(error) << "Failed to allocate input for streaming session"sv;
+          return -1;
+        }
+      }
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
@@ -2315,7 +2349,14 @@ namespace stream {
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
       session->client_cert = launch_session.client_cert;
-      session->input_session_id = launch_session.client_cert.empty() ? launch_session.unique_id : launch_session.client_cert;
+      session->permissions = launch_session.perm;
+      session->input_session_id = launch_session.client_cert.empty() ? std::string {} : crypto::cert_fingerprint(launch_session.client_cert);
+
+      session->input = input::alloc(mail, session->input_session_id, session->permissions);
+      if (!session->input) {
+        BOOST_LOG(error) << "Failed to allocate stream input; rejecting session allocation"sv;
+        return nullptr;
+      }
 
       session->config = config;
 
@@ -2369,7 +2410,11 @@ namespace stream {
       };
 
       session->audio.ping_payload = launch_session.av_ping_payload;
-      session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
+      if (launch_session.iv.size() >= sizeof(std::uint32_t)) {
+        session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
+      } else {
+        session->audio.avRiKeyId = 0;
+      }
       session->audio.sequenceNumber = 0;
       session->audio.timestamp = 0;
 

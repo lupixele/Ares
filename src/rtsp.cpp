@@ -1300,6 +1300,11 @@ namespace rtsp_stream {
     }
 
     auto stream_session = stream::session::alloc(config, session);
+    if (!stream_session) {
+      BOOST_LOG(error) << "Failed to allocate streaming session"sv;
+      respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
+      return;
+    }
     server->insert(stream_session);
 
     if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {

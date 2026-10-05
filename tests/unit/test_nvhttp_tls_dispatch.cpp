@@ -239,6 +239,11 @@ protected:
       response->write(principal ? std::to_string(static_cast<uint32_t>(principal->perm)) : "MISSING PRINCIPAL REACHED ENDPOINT");
     };
 
+    server->resource["^/launch-perm$"]["GET"] = [](auto response, auto request) {
+      const auto session = nvhttp::test_support::make_request_launch_session(request);
+      response->write(session ? std::to_string(static_cast<uint32_t>(session->perm)) : "MISSING PRINCIPAL REACHED ENDPOINT");
+    };
+
     auto listening = std::make_shared<std::promise<unsigned short>>();
     auto ready = listening->get_future();
     worker = std::thread([this, listening]() {
@@ -413,6 +418,19 @@ TEST_F(TLSDispatchTest, LaunchSessionIdentityUsesAuthorizedPrincipal) {
 
   tls_client client(port, &client_creds);
   EXPECT_EQ(client.request("/launch-identity?rikey=0123456789abcdef0123456789abcdef&rikeyid=1&appid=1&client_name=spoof&client_cert=spoof&uniqueid=spoof"), "LaunchClient");
+}
+
+TEST_F(TLSDispatchTest, LaunchSessionPermissionsMappedFromAuthorizedPrincipal) {
+  const auto client_creds = crypto::gen_creds("TLS Perm Launch Client", 2048);
+  const auto expected_perm = crypto::PERM::input_mouse | crypto::PERM::input_controller;
+  nvhttp::test_support::add_client("PermLaunchClient", client_creds.x509, true, expected_perm);
+
+  tls_client client(port, &client_creds);
+  // Spoofed query parameters cannot alter mapped permission
+  EXPECT_EQ(
+    client.request("/launch-perm?rikey=0123456789abcdef0123456789abcdef&rikeyid=1&appid=1&perm=12345&permissions=99999"),
+    std::to_string(static_cast<uint32_t>(expected_perm))
+  );
 }
 
 TEST_F(TLSDispatchTest, KeepAliveRequestPrincipalPermissionSnapshotTracksRegistryUpdate) {

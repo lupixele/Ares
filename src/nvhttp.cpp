@@ -716,6 +716,7 @@ namespace nvhttp {
     launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
     launch_session->client_cert = principal.cert;
     launch_session->client_name = principal.name;
+    launch_session->perm = principal.perm;
 
     // Generate the unique identifiers for this connection that we will send later during RTSP handshake
     unsigned char raw_payload[8];
