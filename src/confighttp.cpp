@@ -1334,18 +1334,20 @@ namespace confighttp {
   }
 
   /**
-   * @brief Enable or disable a client.
+   * @brief Enable, disable, or update permissions of a paired client.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
    * The body for the POST request should be JSON serialized in the following format:
    * @code{.json}
    * {
    *   "uuid": "<uuid>",
-   *   "enabled": true
+   *   "enabled": true,
+   *   "perm": 119480064
    * }
    * @endcode
    *
    * @api_examples{/api/clients/update|:| POST|:| {"uuid":"<uuid>","enabled":true}}
+   * @api_examples{/api/clients/update|:| POST|:| {"uuid":"<uuid>","perm":256}}
    */
   void updateClient(resp_https_t response, req_https_t request) {
     if (!check_content_type(response, request, "application/json")) {
@@ -1365,12 +1367,77 @@ namespace confighttp {
     ss << request->content.rdbuf();
     try {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
-      nlohmann::json output_tree;
-      std::string uuid = input_tree.value("uuid", "");
-      bool enabled = input_tree.value("enabled", true);
-      output_tree["status"] = nvhttp::set_client_enabled(uuid, enabled);
+      if (!input_tree.is_object()) {
+        bad_request(response, request, "Expected JSON object");
+        return;
+      }
 
-      if (!enabled && output_tree["status"]) {
+      if (!input_tree.contains("uuid") || !input_tree["uuid"].is_string()) {
+        bad_request(response, request, "Missing or invalid client UUID");
+        return;
+      }
+
+      const std::string uuid = input_tree["uuid"].get<std::string>();
+      if (uuid.empty()) {
+        bad_request(response, request, "Client UUID cannot be empty");
+        return;
+      }
+
+      std::optional<bool> enabled_opt;
+      std::optional<uint32_t> perm_opt;
+
+      if (input_tree.contains("enabled")) {
+        if (!input_tree["enabled"].is_boolean()) {
+          bad_request(response, request, "Invalid enabled value: must be boolean");
+          return;
+        }
+        enabled_opt = input_tree["enabled"].get<bool>();
+      }
+
+      if (input_tree.contains("perm")) {
+        const auto &perm_node = input_tree["perm"];
+        if (perm_node.is_boolean() || perm_node.is_string() || perm_node.is_null() ||
+            perm_node.is_object() || perm_node.is_array() || perm_node.is_number_float()) {
+          bad_request(response, request, "Invalid perm value: must be an unsigned integer");
+          return;
+        }
+        if (perm_node.is_number_unsigned()) {
+          const auto raw_perm = perm_node.get<uint64_t>();
+          if (raw_perm > std::numeric_limits<uint32_t>::max()) {
+            bad_request(response, request, "Invalid perm value: out of 32-bit range");
+            return;
+          }
+          perm_opt = static_cast<uint32_t>(raw_perm);
+        } else if (perm_node.is_number_integer()) {
+          const auto signed_val = perm_node.get<int64_t>();
+          if (signed_val < 0) {
+            bad_request(response, request, "Invalid perm value: cannot be negative");
+            return;
+          }
+          if (static_cast<uint64_t>(signed_val) > std::numeric_limits<uint32_t>::max()) {
+            bad_request(response, request, "Invalid perm value: out of 32-bit range");
+            return;
+          }
+          perm_opt = static_cast<uint32_t>(signed_val);
+        } else {
+          bad_request(response, request, "Invalid perm value: must be an unsigned integer");
+          return;
+        }
+      }
+
+      if (!enabled_opt.has_value() && !perm_opt.has_value()) {
+        bad_request(response, request, "No client fields to update");
+        return;
+      }
+
+      nlohmann::json output_tree;
+      const bool success = nvhttp::update_client(uuid, enabled_opt, perm_opt);
+      output_tree["status"] = success;
+      if (!success) {
+        output_tree["error"] = "Client not found or failed to persist state";
+      }
+
+      if (success && enabled_opt.has_value() && !*enabled_opt) {
         auto cert = nvhttp::get_cert_by_uuid(uuid);
         if (!cert.empty()) {
           rtsp_stream::terminate_sessions_by_cert(cert);
@@ -1382,7 +1449,7 @@ namespace confighttp {
       }
 
       send_response(response, output_tree);
-    } catch (nlohmann::json::exception &e) {
+    } catch (const std::exception &e) {
       BOOST_LOG(warning) << "Update Client: "sv << e.what();
       bad_request(response, request, e.what());
     }

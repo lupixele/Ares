@@ -362,6 +362,31 @@ namespace nvhttp {
    * @return true if the client was found and updated.
    */
   bool set_client_enabled(std::string_view uuid, bool enabled);
+
+  /**
+   * @brief Update permissions for a paired client identified by UUID.
+   *
+   * Masks unrecognized bits against crypto::PERM::_all and persists state.
+   * If persistence fails, the in-memory change is rolled back.
+   *
+   * @param uuid Unique ID of the client to update.
+   * @param perm Permission bitmask.
+   * @return True if the client was found and permissions were updated and persisted, false otherwise.
+   */
+  bool update_client_permissions(std::string_view uuid, uint32_t perm);
+
+  /**
+   * @brief Update enabled state and/or permissions for a paired client identified by UUID.
+   *
+   * Masks unrecognized permission bits against crypto::PERM::_all and persists state.
+   * If persistence fails, in-memory modifications are rolled back.
+   *
+   * @param uuid Unique ID of the client to update.
+   * @param enabled Optional new enabled state. If omitted, existing enabled state is preserved.
+   * @param perm Optional new permission bitmask. If omitted, existing permissions are preserved.
+   * @return True if the client was found and updated, false otherwise.
+   */
+  bool update_client(std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm);
   /**
    * @brief Get cert by UUID.
    *

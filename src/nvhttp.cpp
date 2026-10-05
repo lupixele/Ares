@@ -295,42 +295,40 @@ namespace nvhttp {
 
   /**
    * @brief Persist the current state to its backing store.
+   *
+   * @return True when the state was successfully persisted, false on error.
    */
-  void save_state() {
+  bool save_state() {
     pt::ptree root;
 
-    if (fs::exists(config::nvhttp.file_state)) {
-      try {
-        pt::read_json(config::nvhttp.file_state, root);
-      } catch (std::exception &e) {
-        BOOST_LOG(error) << "Couldn't read "sv << config::nvhttp.file_state << ": "sv << e.what();
-        return;
-      }
-    }
-
-    root.erase("root"s);
-
-    root.put("root.uniqueid", http::unique_id);
-    client_t &client = client_root;
-    pt::ptree node;
-
-    pt::ptree named_cert_nodes;
-    for (auto &named_cert : client.named_devices) {
-      pt::ptree named_cert_node;
-      named_cert_node.put("name"s, named_cert.name);
-      named_cert_node.put("cert"s, named_cert.cert);
-      named_cert_node.put("uuid"s, named_cert.uuid);
-      named_cert_node.put("enabled"s, named_cert.enabled);
-      named_cert_node.put("perm"s, static_cast<uint32_t>(named_cert.perm));
-      named_cert_nodes.push_back(std::make_pair(""s, named_cert_node));
-    }
-    root.add_child("root.named_devices"s, named_cert_nodes);
-
     try {
+      if (fs::exists(config::nvhttp.file_state)) {
+        pt::read_json(config::nvhttp.file_state, root);
+      }
+
+      root.erase("root"s);
+
+      root.put("root.uniqueid", http::unique_id);
+      client_t &client = client_root;
+      pt::ptree node;
+
+      pt::ptree named_cert_nodes;
+      for (auto &named_cert : client.named_devices) {
+        pt::ptree named_cert_node;
+        named_cert_node.put("name"s, named_cert.name);
+        named_cert_node.put("cert"s, named_cert.cert);
+        named_cert_node.put("uuid"s, named_cert.uuid);
+        named_cert_node.put("enabled"s, named_cert.enabled);
+        named_cert_node.put("perm"s, static_cast<uint32_t>(named_cert.perm));
+        named_cert_nodes.push_back(std::make_pair(""s, named_cert_node));
+      }
+      root.add_child("root.named_devices"s, named_cert_nodes);
+
       pt::write_json(config::nvhttp.file_state, root);
+      return true;
     } catch (std::exception &e) {
-      BOOST_LOG(error) << "Couldn't write "sv << config::nvhttp.file_state << ": "sv << e.what();
-      return;
+      BOOST_LOG(error) << "Couldn't persist state to "sv << config::nvhttp.file_state << ": "sv << e.what();
+      return false;
     }
   }
 
@@ -1940,17 +1938,67 @@ namespace nvhttp {
     return removed;
   }
 
-  bool set_client_enabled(const std::string_view uuid, bool enabled) {
+  /**
+   * @brief Update paired client configuration (enabled state and/or permissions).
+   *
+   * @param uuid Unique ID of the client to update.
+   * @param enabled Optional new enabled state. If omitted, existing state is preserved.
+   * @param perm Optional new permission bitmask. If omitted, existing permissions are preserved.
+   * @return True if client was found and changes persisted; false on unknown client or write failure.
+   */
+  bool update_client(const std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm) {
     std::lock_guard lock {client_auth_mutex()};
     for (auto &named_cert : client_root.named_devices) {
       if (named_cert.uuid == uuid) {
-        named_cert.enabled = enabled;
-        rebuild_client_cert_chain();
-        save_state();
+        const auto old_enabled = named_cert.enabled;
+        const auto old_perm = named_cert.perm;
+        bool changed_enabled = false;
+
+        if (enabled.has_value()) {
+          named_cert.enabled = *enabled;
+          changed_enabled = true;
+          rebuild_client_cert_chain();
+        }
+
+        if (perm.has_value()) {
+          named_cert.perm = static_cast<crypto::PERM>(*perm & static_cast<uint32_t>(crypto::PERM::_all));
+        }
+
+        if (!save_state()) {
+          named_cert.enabled = old_enabled;
+          named_cert.perm = old_perm;
+          if (changed_enabled) {
+            rebuild_client_cert_chain();
+          }
+          return false;
+        }
+
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * @brief Enable or disable a client.
+   *
+   * @param uuid The UUID of the client.
+   * @param enabled Whether the client should be enabled.
+   * @return True if the client was found and updated.
+   */
+  bool set_client_enabled(const std::string_view uuid, bool enabled) {
+    return update_client(uuid, enabled, std::nullopt);
+  }
+
+  /**
+   * @brief Update client permissions by UUID.
+   *
+   * @param uuid The UUID of the client.
+   * @param perm Permission bitmask.
+   * @return True if the client was found and updated.
+   */
+  bool update_client_permissions(const std::string_view uuid, uint32_t perm) {
+    return update_client(uuid, std::nullopt, perm);
   }
 
   /**

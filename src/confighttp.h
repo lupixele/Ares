@@ -118,6 +118,22 @@ namespace confighttp {
   void savePin(const resp_https_t &response, const req_https_t &request);
 
   /**
+   * @brief Get the list of paired clients.
+   *
+   * @param response HTTP response object to populate.
+   * @param request HTTP request data from the client.
+   */
+  void getClients(const resp_https_t &response, const req_https_t &request);
+
+  /**
+   * @brief Enable, disable, or update permissions of a paired client.
+   *
+   * @param response HTTP response object to populate.
+   * @param request HTTP request data from the client.
+   */
+  void updateClient(resp_https_t response, req_https_t request);
+
+  /**
    * @brief Check whether a detected driver version identifies a development build.
    *
    * Numeric versions beginning with `0.0` and containing at least three

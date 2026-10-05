@@ -88,8 +88,43 @@ struct client_principal_t {
 ```
 On every HTTP request (including consecutive keep-alive requests on a persistent TLS connection), `resolve_tls_principal()` captures the latest permission bitmask from the server pairing registry under `client_auth_mutex()`. Registry modifications are immediately reflected on subsequent requests over existing keep-alive connections.
 
+## Administrative Management Flow and REST API
+
+Administrative mutation of client permissions and connection authorization is exposed through Sunshine's authenticated and CSRF-protected Web UI management API:
+
+1. **Client Update Endpoint (`POST /api/clients/update`)**:
+   - **Authentication and CSRF Protection**: Requires HTTP Basic Authentication and CSRF token verification on cross-origin requests.
+   - **Payload Schema**:
+     ```json
+     {
+       "uuid": "<client-uuid>",
+       "enabled": true,
+       "perm": 119480064
+     }
+     ```
+   - **Partial Updates and Omitted Field Preservation**:
+     - `uuid` is required. Missing, empty, or non-string UUIDs are rejected with `400 Bad Request`.
+     - `enabled` is optional. When omitted, the client's current enabled status is preserved. When supplied, it must be a strict boolean.
+     - `perm` is optional. When omitted, the client's current permission bitmask is preserved.
+     - At least one update field (`enabled` or `perm`) must be provided.
+   - **Strict HTTP Boundary Validation**:
+     - Parsed directly with nlohmann::json.
+     - Rejects negative integers (e.g. `-1`), floating point numbers (e.g. `256.5`), booleans (e.g. `true`), strings (e.g. `"256"`), arrays, objects, `null`, and values exceeding 32-bit unsigned integer range (`> 4294967295`) with `400 Bad Request`.
+     - `perm: 0` (`crypto::PERM::_no`) is valid and accepted.
+   - **Unknown Bits Stripping**:
+     - Input bitmasks are masked against `crypto::PERM::_all` (`0x071F1F00`) to strip unassigned or future bits.
+   - **Transactional Rollback on Persistence Failure**:
+     - Mutates state under `client_auth_mutex()`.
+     - If saving state to disk fails, in-memory modifications to `client_root` and certificate chains are rolled back to their previous values. The API reports failure (`status: false`), ensuring no transient privilege escalation occurs in memory.
+   - **Separation of Concerns**:
+     - `enabled` (certificate connection allowance) and `perm` (action/input permissions) are maintained independently. Granting `perm: 0` does not disable a client, and disabling a client preserves its assigned permissions.
+
+2. **Client Listing Endpoint (`GET /api/clients/list`)**:
+   - Authenticated endpoint returning all paired clients.
+   - Each client record includes `name`, `uuid`, `enabled`, and `perm` (uint32 bitmask).
+
 ## Staged Implementation Boundary
 
-- **New Client Default**: Newly paired clients continue to default to `crypto::PERM::_all`.
-- **Enforcement Readiness**: Input passthrough gating and administrative UI management remain unported. Restricting permissions at this stage would present a false sense of security while low-level input backends remain ungated.
-- **Endpoint Policy**: Endpoint-level policies (`/launch`, `/resume`, `/applist`) are maintained without behavioral change until full action and stream input enforcement slices are ratified.
+- **New Client Default**: Newly paired clients continue to default to `crypto::PERM::_all` (`119480064`) to avoid accidental client lockout before pairing policy settings are introduced.
+- **Enforcement Readiness**: Administrative mutation paths are now established, persistence-backed, and verified. However, runtime input interception gating (gamepad, keyboard, mouse, touch, clipboard) and runtime action gating (`/launch`, `/resume`, `/applist`) remain separate subsequent slices. Restricting permissions via the admin API persists the configuration correctly and updates request principals, but does not yet block streaming input or actions at runtime.
+- **Re-Pair Restrictions**: Re-pairing an existing client preserves both its configured permissions and its disabled state without privilege escalation.

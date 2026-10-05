@@ -8,6 +8,7 @@
  */
 
 // test includes
+#include "../certificate_test_utils.h"
 #include "../tests_common.h"
 
 // standard includes
@@ -338,6 +339,8 @@ protected:
     server->resource["^/pairing-test$"]["GET"] = confighttp::getPendingPairings;
     server->resource["^/pairing-test$"]["POST"] = confighttp::savePin;
     server->resource["^/portal-token-reset-test$"]["POST"] = confighttp::resetPortalToken;
+    server->resource["^/api/clients/list$"]["GET"] = confighttp::getClients;
+    server->resource["^/api/clients/update$"]["POST"] = confighttp::updateClient;
     server->default_resource["GET"] = confighttp::getFallbackPage;
 
     // Start server
@@ -2012,3 +2015,309 @@ TEST_F(BrowseDirectoryTest, GetWindowsDrives_EntriesHaveCorrectFormat) {
   }
 }
 #endif
+
+/**
+ * @brief Test suite for client management endpoints (/api/clients/update and /api/clients/list).
+ */
+class ConfigHttpClientManagementTest: public ConfigHttpTest {
+protected:
+  std::filesystem::path state_file;  ///< Isolated state file fixture for client management tests.
+  std::string original_state_file;  ///< Original configured state file restored after tests.
+  bool original_fresh_state;  ///< Original fresh state flag restored after tests.
+
+  /**
+   * @brief Configure an isolated state file and reset client state before each test.
+   */
+  void SetUp() override {
+    ConfigHttpTest::SetUp();
+    original_state_file = config::nvhttp.file_state;
+    original_fresh_state = config::sunshine.flags[config::flag::FRESH_STATE];
+    state_file = test_web_dir / "client_management_state.json";
+
+    config::nvhttp.file_state = state_file.string();
+    config::sunshine.flags[config::flag::FRESH_STATE] = false;
+    nvhttp::test_support::reset_client_state();
+
+    std::error_code ec;
+    std::filesystem::remove(state_file, ec);
+  }
+
+  /**
+   * @brief Clean up the isolated state file and restore original configuration.
+   */
+  void TearDown() override {
+    nvhttp::test_support::reset_client_state();
+    std::error_code ec;
+    std::filesystem::remove(state_file, ec);
+
+    config::nvhttp.file_state = original_state_file;
+    config::sunshine.flags[config::flag::FRESH_STATE] = original_fresh_state;
+    ConfigHttpTest::TearDown();
+  }
+};
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientRejectsUnauthenticatedRequests) {
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Content-Type", "application/json");
+
+  const auto response = client->request(
+    "POST",
+    "/api/clients/update",
+    R"({"uuid":"test-uuid","perm":256})",
+    headers
+  );
+  EXPECT_EQ(response->status_code, "401 Unauthorized");
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientRejectsCrossOriginRequestsWithoutCsrfToken) {
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+  headers.emplace("Origin", "https://example.invalid");
+
+  const auto response = client->request(
+    "POST",
+    "/api/clients/update",
+    R"({"uuid":"test-uuid","perm":256})",
+    headers
+  );
+  EXPECT_EQ(response->status_code, "400 Bad Request");
+  EXPECT_TRUE(response->content.string().contains("Missing CSRF token"));
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientRejectsMalformedAndOutOfRangePermValues) {
+  const auto creds = test_utils::certificates::generate_ca_credentials();
+  const auto uuid = nvhttp::test_support::add_client("Test Client", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  const std::vector<std::string> invalid_bodies = {
+    // Missing uuid
+    R"({"perm":256})",
+    // Empty uuid
+    R"({"uuid":"","perm":256})",
+    // Non-string uuid
+    R"({"uuid":12345,"perm":256})",
+    // Negative integer perm
+    std::format(R"({{"uuid":"{}","perm":-1}})", uuid),
+    // Non-integer float perm
+    std::format(R"({{"uuid":"{}","perm":256.5}})", uuid),
+    // Non-integer bool perm
+    std::format(R"({{"uuid":"{}","perm":true}})", uuid),
+    // Non-integer string perm
+    std::format(R"({{"uuid":"{}","perm":"256"}})", uuid),
+    // Out of range (exceeds uint32) perm
+    std::format(R"({{"uuid":"{}","perm":4294967296}})", uuid),
+    // Non-boolean enabled
+    std::format(R"({{"uuid":"{}","enabled":"true"}})", uuid),
+    // No updates provided
+    std::format(R"({{"uuid":"{}"}})", uuid),
+  };
+
+  for (const auto &body : invalid_bodies) {
+    const auto response = client->request("POST", "/api/clients/update", body, headers);
+    EXPECT_EQ(response->status_code, "400 Bad Request") << "Failed for body: " << body;
+  }
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientUnknownUuidReportsApplicationErrorWithoutMutations) {
+  const auto creds = test_utils::certificates::generate_ca_credentials();
+  const auto uuid = nvhttp::test_support::add_client("Known Client", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  const auto response = client->request(
+    "POST",
+    "/api/clients/update",
+    R"({"uuid":"unknown-uuid-000","perm":0})",
+    headers
+  );
+  EXPECT_EQ(response->status_code, "200 OK");
+  const auto res_json = nlohmann::json::parse(response->content.string());
+  EXPECT_FALSE(res_json.value("status", true));
+
+  // Verify known client was completely unchanged
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientAcceptsZeroPermissionValid) {
+  const auto creds = test_utils::certificates::generate_ca_credentials();
+  const auto uuid = nvhttp::test_support::add_client("Zero Client", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  const auto response = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":0}})", uuid),
+    headers
+  );
+  EXPECT_EQ(response->status_code, "200 OK");
+  const auto res_json = nlohmann::json::parse(response->content.string());
+  EXPECT_TRUE(res_json.value("status", false));
+
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_no);
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientPartialUpdatePreservesOmittedFields) {
+  const auto creds = test_utils::certificates::generate_ca_credentials();
+  const auto uuid = nvhttp::test_support::add_client(
+    "Preserve Client", creds.x509, true, crypto::PERM::input_controller
+  );
+  ASSERT_FALSE(uuid.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  // 1. Partial update: only update enabled=false, omitting perm
+  const auto resp1 = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","enabled":false}})", uuid),
+    headers
+  );
+  EXPECT_EQ(resp1->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(resp1->content.string()).value("status", false));
+
+  // perm should be preserved, not reset to _all or _no
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::input_controller);
+  const auto clients1 = nvhttp::get_all_clients();
+  ASSERT_EQ(clients1.size(), 1);
+  EXPECT_FALSE(clients1[0]["enabled"].get<bool>());
+
+  // 2. Partial update: only update perm, omitting enabled
+  const auto resp2 = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":{}}})", uuid, static_cast<uint32_t>(crypto::PERM::input_touch)),
+    headers
+  );
+  EXPECT_EQ(resp2->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(resp2->content.string()).value("status", false));
+
+  // enabled=false should still be preserved
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::input_touch);
+  const auto clients2 = nvhttp::get_all_clients();
+  ASSERT_EQ(clients2.size(), 1);
+  EXPECT_FALSE(clients2[0]["enabled"].get<bool>());
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientMasksUnknownBitsAndReloadsPersistedState) {
+  const auto creds = test_utils::certificates::generate_ca_credentials();
+  const auto uuid = nvhttp::test_support::add_client("Mask Client", creds.x509, true, crypto::PERM::_no);
+  ASSERT_FALSE(uuid.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  // Send 0xFFFFFFFF (all bits set)
+  const auto response = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":4294967295}})", uuid),
+    headers
+  );
+  EXPECT_EQ(response->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(response->content.string()).value("status", false));
+
+  // In-memory state should mask away unknown bits
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+
+  // Reload state from disk to verify persistence
+  nvhttp::test_support::reload_client_state();
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+}
+
+TEST_F(ConfigHttpClientManagementTest, GetClientsReadOnlyListIncludesPermission) {
+  const auto cred1 = test_utils::certificates::generate_ca_credentials("Client One");
+  const auto cred2 = test_utils::certificates::generate_ca_credentials("Client Two");
+  const auto uuid1 = nvhttp::test_support::add_client("Client One", cred1.x509, true, crypto::PERM::input_controller);
+  const auto uuid2 = nvhttp::test_support::add_client("Client Two", cred2.x509, false, crypto::PERM::_no);
+  ASSERT_FALSE(uuid1.empty());
+  ASSERT_FALSE(uuid2.empty());
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+
+  const auto response = client->request("GET", "/api/clients/list", "", headers);
+  EXPECT_EQ(response->status_code, "200 OK");
+
+  const auto res_json = nlohmann::json::parse(response->content.string());
+  EXPECT_TRUE(res_json.value("status", false));
+  ASSERT_TRUE(res_json.contains("named_certs"));
+  const auto &named_certs = res_json["named_certs"];
+  ASSERT_EQ(named_certs.size(), 2);
+
+  bool found1 = false;
+  bool found2 = false;
+  for (const auto &item : named_certs) {
+    ASSERT_TRUE(item.contains("uuid"));
+    ASSERT_TRUE(item.contains("name"));
+    ASSERT_TRUE(item.contains("enabled"));
+    ASSERT_TRUE(item.contains("perm"));
+
+    if (item["uuid"] == uuid1) {
+      found1 = true;
+      EXPECT_EQ(item["perm"].get<uint32_t>(), static_cast<uint32_t>(crypto::PERM::input_controller));
+      EXPECT_TRUE(item["enabled"].get<bool>());
+    } else if (item["uuid"] == uuid2) {
+      found2 = true;
+      EXPECT_EQ(item["perm"].get<uint32_t>(), 0u);
+      EXPECT_FALSE(item["enabled"].get<bool>());
+    }
+  }
+  EXPECT_TRUE(found1);
+  EXPECT_TRUE(found2);
+}
+
+TEST_F(ConfigHttpClientManagementTest, UpdateClientRollsBackInMemoryStateOnPersistenceFailure) {
+  const auto creds = test_utils::certificates::generate_ca_credentials();
+  const auto uuid = nvhttp::test_support::add_client("Rollback Client", creds.x509, true, crypto::PERM::_no);
+  ASSERT_FALSE(uuid.empty());
+  ASSERT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_no);
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  // Point state_file to an invalid path that cannot be written
+  const auto invalid_path = test_web_dir / "nonexistent_directory_for_test" / "file.json";
+  config::nvhttp.file_state = invalid_path.string();
+
+  // Attempt to elevate permission to _all
+  const auto response = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":{}}})", uuid, static_cast<uint32_t>(crypto::PERM::_all)),
+    headers
+  );
+  EXPECT_EQ(response->status_code, "200 OK");
+  const auto res_json = nlohmann::json::parse(response->content.string());
+  EXPECT_FALSE(res_json.value("status", true));
+
+  // In-memory state MUST be rolled back to PERM::_no - no escalation!
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_no);
+
+  // Restore valid state path and verify mutation succeeds
+  config::nvhttp.file_state = state_file.string();
+  const auto retry_response = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":{}}})", uuid, static_cast<uint32_t>(crypto::PERM::_all)),
+    headers
+  );
+  EXPECT_EQ(retry_response->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(retry_response->content.string()).value("status", false));
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+}
