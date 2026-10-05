@@ -420,6 +420,51 @@ namespace nvhttp {
   };
 
   /**
+   * @brief Target action types for GameStream permission gating.
+   */
+  enum class action_type_t {
+    applist,  ///< Enumerating available applications.
+    launch,   ///< Launching an application session.
+    resume    ///< Resuming or joining an active session.
+  };
+
+  /**
+   * @brief Outcome of action authorization evaluation.
+   */
+  struct action_decision_t {
+    bool allowed {false};                            ///< True if permission is granted.
+    crypto::PERM required_perm {crypto::PERM::_no};  ///< Permission bitmask evaluated against client.
+  };
+
+  /**
+   * @brief Evaluate whether a client principal's permissions permit the requested action under Apollo semantics.
+   *
+   * @param action Target action (applist, launch, resume).
+   * @param client_perm Immutable permission snapshot from TLS principal.
+   * @param current_appid Currently running application ID (if any).
+   * @param requested_appid Application ID requested by the client (for launch).
+   * @return Evaluation result containing allowed flag and required permission mask.
+   */
+  action_decision_t make_action_decision(
+    action_type_t action,
+    crypto::PERM client_perm,
+    int current_appid = 0,
+    int requested_appid = 0
+  );
+
+  /**
+   * @brief Alias for make_action_decision.
+   */
+  inline action_decision_t make_allowed_decision(
+    action_type_t action,
+    crypto::PERM client_perm,
+    int current_appid = 0,
+    int requested_appid = 0
+  ) {
+    return make_action_decision(action, client_perm, current_appid, requested_appid);
+  }
+
+  /**
    * @brief Read the server-attached identity of an authorized TLS request.
    * @param request Parsed request from the HTTPS backend.
    * @return Immutable paired identity, or null when authorization was not performed.
@@ -429,6 +474,30 @@ namespace nvhttp {
 #ifdef SUNSHINE_TESTS
   /** @brief Test-only accessors for paired-client authorization state. */
   namespace test_support {
+    using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
+    using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
+
+    /**
+     * @brief When set, production launch handler performs full TLS authentication,
+     *        permission enforcement, parameter parsing, and session initialization,
+     *        but bypasses hardware encoder probing and process execution.
+     * @note Narrow test seam to verify production handler without hardware/E2E dependencies.
+     */
+    extern bool skip_hardware_for_testing;
+
+    /**
+     * @brief Mount production applist, launch, and resume routes onto an authorized HTTPS test server.
+     * @param server The test server instance.
+     * @param host_audio Reference to boolean receiving localAudioPlayMode.
+     */
+    void mount_production_action_routes(
+      std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> &server,
+      bool &host_audio
+    );
+
+    void applist_https(resp_https_t response, req_https_t request);
+    void launch_https(bool &host_audio, resp_https_t response, req_https_t request);
+    void resume_https(bool &host_audio, resp_https_t response, req_https_t request);
     /**
      * @brief Construct the production TLS authorization backend for loopback integration tests.
      * @param certificate Test server certificate file.

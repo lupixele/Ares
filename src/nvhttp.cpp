@@ -1493,6 +1493,36 @@ namespace nvhttp {
     return named_cert_nodes;
   }
 
+  action_decision_t make_action_decision(
+    action_type_t action,
+    crypto::PERM client_perm,
+    int current_appid,
+    int requested_appid
+  ) {
+    action_decision_t decision;
+    switch (action) {
+      case action_type_t::applist:
+        decision.required_perm = crypto::PERM::_all_actions;
+        decision.allowed = !!(client_perm & crypto::PERM::_all_actions);
+        break;
+
+      case action_type_t::resume:
+        decision.required_perm = crypto::PERM::_allow_view;
+        decision.allowed = !!(client_perm & crypto::PERM::_allow_view);
+        break;
+
+      case action_type_t::launch:
+        if (current_appid > 0 && requested_appid > 0 && requested_appid == current_appid) {
+          decision.required_perm = crypto::PERM::_allow_view;
+        } else {
+          decision.required_perm = crypto::PERM::launch;
+        }
+        decision.allowed = !!(client_perm & decision.required_perm);
+        break;
+    }
+    return decision;
+  }
+
   /**
    * @brief Build the GameStream application list response.
    *
@@ -1508,7 +1538,9 @@ namespace nvhttp {
       std::ostringstream data;
 
       pt::write_xml(data, tree);
-      response->write(data.str());
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Length", std::to_string(data.str().size()));
+      response->write(data.str(), headers);
       response->close_connection_after_response = true;
     });
 
@@ -1516,14 +1548,33 @@ namespace nvhttp {
 
     apps.put("<xmlattr>.status_code", 200);
 
-    for (auto &proc : proc::proc.get_apps()) {
-      pt::ptree app;
+    const auto principal = request_principal(request);
+    const auto client_perm = principal ? principal->perm : crypto::PERM::_no;
+    const auto decision = make_action_decision(action_type_t::applist, client_perm);
 
-      app.put("IsHdrSupported"s, video::active_hevc_mode >= 3 ? 1 : 0);
-      app.put("AppTitle"s, proc.name);
-      app.put("ID", proc.id);
+    if (decision.allowed) {
+      for (auto &proc : proc::proc.get_apps()) {
+        pt::ptree app;
 
-      apps.push_back(std::make_pair("App", std::move(app)));
+        app.put("IsHdrSupported"s, video::active_hevc_mode >= 3 ? 1 : 0);
+        app.put("AppTitle"s, proc.name);
+        app.put("ID", proc.id);
+
+        apps.push_back(std::make_pair("App", std::move(app)));
+      }
+    } else {
+      BOOST_LOG(debug) << "Permission ListApp denied for ["sv << (principal ? principal->name : "unknown"s)
+                       << "] ("sv << static_cast<uint32_t>(client_perm) << ")"sv;
+
+      pt::ptree app_node;
+
+      app_node.put("IsHdrSupported"s, 0);
+      app_node.put("AppTitle"s, "Permission Denied");
+      app_node.put("ID", "114514");
+
+      apps.push_back(std::make_pair("App", std::move(app_node)));
+
+      return;
     }
   }
 
@@ -1547,7 +1598,9 @@ namespace nvhttp {
       }
 
       pt::write_xml(data, tree);
-      response->write(data.str());
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Length", std::to_string(data.str().size()));
+      response->write(data.str(), headers);
       response->close_connection_after_response = true;
 
       if (revert_display_configuration) {
@@ -1555,7 +1608,31 @@ namespace nvhttp {
       }
     });
 
+    const auto principal = request_principal(request);
+    if (!principal) {
+      tree.put("root.gamesession", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "Client identity is not authorized");
+      return;
+    }
+
     auto args = request->parse_query_string();
+    auto appid_str = get_arg(args, "appid", "0");
+    auto appid = static_cast<int>(util::from_view(appid_str));
+    auto current_appid = proc::proc.running();
+
+    const auto decision = make_action_decision(action_type_t::launch, principal->perm, current_appid, appid);
+    if (!decision.allowed) {
+      BOOST_LOG(debug) << "Permission LaunchApp denied for ["sv << principal->name
+                       << "] ("sv << static_cast<uint32_t>(principal->perm) << ")"sv;
+
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
+      tree.put("root.<xmlattr>.status_message", "Permission denied");
+
+      return;
+    }
+
     if (
       args.find("rikey"s) == std::end(args) ||
       args.find("rikeyid"s) == std::end(args) ||
@@ -1569,9 +1646,6 @@ namespace nvhttp {
       return;
     }
 
-    auto appid = util::from_view(get_arg(args, "appid"));
-
-    auto current_appid = proc::proc.running();
     if (current_appid > 0) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -1581,14 +1655,15 @@ namespace nvhttp {
     }
 
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    const auto principal = request_principal(request);
-    if (!principal) {
-      tree.put("root.gamesession", 0);
-      tree.put("root.<xmlattr>.status_code", 401);
-      tree.put("root.<xmlattr>.status_message", "Client identity is not authorized");
+    auto launch_session = make_launch_session(host_audio, args, *principal);
+
+#ifdef SUNSHINE_TESTS
+    if (test_support::skip_hardware_for_testing) {
+      tree.put("root.gamesession", 1);
+      tree.put("root.<xmlattr>.status_code", 200);
       return;
     }
-    auto launch_session = make_launch_session(host_audio, args, *principal);
+#endif
 
     if (rtsp_stream::session_count() == 0) {
       // The display should be restored in case something fails as there are no other sessions.
@@ -1671,9 +1746,31 @@ namespace nvhttp {
       }
 
       pt::write_xml(data, tree);
-      response->write(data.str());
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Length", std::to_string(data.str().size()));
+      response->write(data.str(), headers);
       response->close_connection_after_response = true;
     });
+
+    const auto principal = request_principal(request);
+    if (!principal) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 401);
+      tree.put("root.<xmlattr>.status_message", "Client identity is not authorized");
+      return;
+    }
+
+    const auto decision = make_action_decision(action_type_t::resume, principal->perm);
+    if (!decision.allowed) {
+      BOOST_LOG(debug) << "Permission ViewApp denied for ["sv << principal->name
+                       << "] ("sv << static_cast<uint32_t>(principal->perm) << ")"sv;
+
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 403);
+      tree.put("root.<xmlattr>.status_message", "Permission denied");
+
+      return;
+    }
 
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
@@ -1702,13 +1799,6 @@ namespace nvhttp {
     const bool no_active_sessions {rtsp_stream::session_count() == 0};
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    }
-    const auto principal = request_principal(request);
-    if (!principal) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 401);
-      tree.put("root.<xmlattr>.status_message", "Client identity is not authorized");
-      return;
     }
     const auto launch_session = make_launch_session(host_audio, args, *principal);
 
@@ -2142,6 +2232,35 @@ namespace nvhttp {
 
 #ifdef SUNSHINE_TESTS
 namespace nvhttp::test_support {
+  bool skip_hardware_for_testing {false};
+
+  void applist_https(resp_https_t response, req_https_t request) {
+    applist(response, request);
+  }
+
+  void launch_https(bool &host_audio, resp_https_t response, req_https_t request) {
+    launch(host_audio, response, request);
+  }
+
+  void resume_https(bool &host_audio, resp_https_t response, req_https_t request) {
+    resume(host_audio, response, request);
+  }
+
+  void mount_production_action_routes(
+    std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>> &server,
+    bool &host_audio
+  ) {
+    server->resource["^/applist$"]["GET"] = [](auto resp, auto req) {
+      applist(resp, req);
+    };
+    server->resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
+      launch(host_audio, resp, req);
+    };
+    server->resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
+      resume(host_audio, resp, req);
+    };
+  }
+
   std::shared_ptr<rtsp_stream::launch_session_t> make_request_launch_session(const std::shared_ptr<SimpleWeb::ServerBase<SunshineHTTPS>::Request> &request) {
     const auto principal = request_principal(request);
     if (!principal) {

@@ -17,6 +17,7 @@
 
 #include <src/config.h>
 #include <src/nvhttp.h>
+#include <src/process.h>
 #include <src/rtsp.h>
 
 namespace {
@@ -61,11 +62,17 @@ namespace {
     }
 
     /**
-     * @brief Send another HTTP request on the same TLS connection.
+     * @brief Send another HTTP request on the same TLS connection and return parsed response details.
      * @param path Target request URI including query parameters.
-     * @return HTTP response body identifying the authorized server-owned principal.
+     * @return Full HTTP response containing status line, headers, and body.
      */
-    std::string request(const std::string &path = "/identity?client_name=spoof&client_cert=spoof") {
+    struct response_t {
+      std::string status_line;
+      std::string all_headers;
+      std::string body;
+    };
+
+    response_t request_full(const std::string &path = "/identity?client_name=spoof&client_cert=spoof") {
       const std::string message = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n";
       run_bounded([this, &message](auto &&handler) {
         boost::asio::async_write(
@@ -88,6 +95,12 @@ namespace {
       std::string line;
       std::optional<std::size_t> length;
       std::string all_headers;
+      std::string status_line;
+      if (std::getline(input, status_line)) {
+        if (!status_line.empty() && status_line.back() == '\r') {
+          status_line.pop_back();
+        }
+      }
       while (std::getline(input, line) && line != "\r") {
         all_headers += line + "\n";
         constexpr std::string_view prefix = "Content-Length: ";
@@ -115,7 +128,7 @@ namespace {
         if (all_headers.find("401 Unauthorized") != std::string::npos) {
           close();
         }
-        return {};
+        return {status_line, all_headers, {}};
       }
 
       if (buffer.size() < *length) {
@@ -135,7 +148,16 @@ namespace {
       if (body == "DENIED" || all_headers.find("401 Unauthorized") != std::string::npos) {
         close();
       }
-      return body;
+      return {status_line, all_headers, body};
+    }
+
+    /**
+     * @brief Send another HTTP request on the same TLS connection.
+     * @param path Target request URI including query parameters.
+     * @return HTTP response body identifying the authorized server-owned principal.
+     */
+    std::string request(const std::string &path = "/identity?client_name=spoof&client_cert=spoof") {
+      return request_full(path).body;
     }
 
     /** @brief Explicitly shut down and close the client socket. */
@@ -244,6 +266,8 @@ protected:
       response->write(session ? std::to_string(static_cast<uint32_t>(session->perm)) : "MISSING PRINCIPAL REACHED ENDPOINT");
     };
 
+    nvhttp::test_support::mount_production_action_routes(server, host_audio);
+
     auto listening = std::make_shared<std::promise<unsigned short>>();
     auto ready = listening->get_future();
     worker = std::thread([this, listening]() {
@@ -288,6 +312,7 @@ protected:
     server.reset();
 
     nvhttp::test_support::reset_client_state();
+    nvhttp::test_support::skip_hardware_for_testing = false;
     config::nvhttp.file_state = old_file_state;
     config::sunshine.credentials_file = old_credentials_file;
     config::sunshine.flags[config::flag::FRESH_STATE] = old_fresh;
@@ -298,6 +323,7 @@ protected:
 
   std::shared_ptr<SimpleWeb::ServerBase<nvhttp::SunshineHTTPS>> server;  ///< Production backend under test.
   unsigned short port {};  ///< Ephemeral loopback listener port.
+  bool host_audio {false};  ///< Production audio playback destination flag.
   std::thread worker;  ///< Server event loop.
   std::filesystem::path directory;  ///< Test-only PEM storage.
   bool old_fresh {};  ///< Original persistence setting.
@@ -467,4 +493,350 @@ TEST_F(TLSDispatchTest, DisabledClientCannotConnectRegardlessOfPermissions) {
   tls_client client(port, &creds);
   // Client is disabled, so authorization fails closed despite having PERM::_all
   EXPECT_EQ(client.request("/principal-perm"), "DENIED");
+}
+
+TEST(ActionDecisionTest, MatrixCoversAllApolloActionPermPermutations) {
+  using action = nvhttp::action_type_t;
+
+  // Mask 0: PERM::_no grants nothing
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::applist, crypto::PERM::_no).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::resume, crypto::PERM::_no).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::_no).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::_no, 1, 1).allowed);
+
+  // List only: PERM::list grants applist, but neither resume nor launch
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::applist, crypto::PERM::list).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::resume, crypto::PERM::list).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::list).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::list, 1, 1).allowed);
+
+  // View only: PERM::view grants applist and resume, but NOT new app launch
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::applist, crypto::PERM::view).allowed);
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::resume, crypto::PERM::view).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::view, 0, 1).allowed);
+  // Apollo nuance: same currently running app allows view-only client to join session
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::view, 42, 42).allowed);
+  // Different running app does not permit view-only client
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::view, 42, 99).allowed);
+  // Blank or 0 appid does not match running app (blank appid false)
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::view, 42, 0).allowed);
+
+  // Launch only: PERM::launch grants applist, resume, and launch
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::applist, crypto::PERM::launch).allowed);
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::resume, crypto::PERM::launch).allowed);
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::launch, 0, 1).allowed);
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::launch, 42, 42).allowed);
+
+  // Full legacy permissions: PERM::_all grants all actions
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::applist, crypto::PERM::_all).allowed);
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::resume, crypto::PERM::_all).allowed);
+  EXPECT_TRUE(nvhttp::make_allowed_decision(action::launch, crypto::PERM::_all, 0, 1).allowed);
+
+  // Input only permissions: no action permissions granted
+  const auto input_only = crypto::PERM::input_mouse | crypto::PERM::input_kbd | crypto::PERM::input_controller;
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::applist, input_only).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::resume, input_only).allowed);
+  EXPECT_FALSE(nvhttp::make_allowed_decision(action::launch, input_only).allowed);
+}
+
+TEST_F(TLSDispatchTest, ApplistPermissionMatrixEnforcesActionGating) {
+  const auto creds_no = crypto::gen_creds("TLS Applist No Perm", 2048);
+  const auto creds_input = crypto::gen_creds("TLS Applist Input Only", 2048);
+  const auto creds_list = crypto::gen_creds("TLS Applist List Only", 2048);
+  const auto creds_view = crypto::gen_creds("TLS Applist View Only", 2048);
+  const auto creds_launch = crypto::gen_creds("TLS Applist Launch Only", 2048);
+  const auto creds_full = crypto::gen_creds("TLS Applist Full Perm", 2048);
+
+  ASSERT_FALSE(nvhttp::test_support::add_client("NoPerm", creds_no.x509, true, crypto::PERM::_no).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("InputOnly", creds_input.x509, true, crypto::PERM::input_mouse).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ListOnly", creds_list.x509, true, crypto::PERM::list).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ViewOnly", creds_view.x509, true, crypto::PERM::view).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("LaunchOnly", creds_launch.x509, true, crypto::PERM::launch).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("FullPerm", creds_full.x509, true, crypto::PERM::_all).empty());
+
+  // 1. Client with PERM::_no receives Apollo denial XML (status 200 with Permission Denied app)
+  {
+    tls_client client(port, &creds_no);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("<AppTitle>Permission Denied</AppTitle>"), std::string::npos);
+    EXPECT_NE(resp.find("<ID>114514</ID>"), std::string::npos);
+  }
+
+  // 2. Client with input-only permissions also receives Apollo denial XML
+  {
+    tls_client client(port, &creds_input);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("<AppTitle>Permission Denied</AppTitle>"), std::string::npos);
+    EXPECT_NE(resp.find("<ID>114514</ID>"), std::string::npos);
+  }
+
+  // 3. Client with PERM::list is permitted: status 200, no "Permission Denied" entry
+  {
+    tls_client client(port, &creds_list);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("status_code=\"200\""), std::string::npos);
+    EXPECT_EQ(resp.find("Permission Denied"), std::string::npos);
+  }
+
+  // 4. Client with PERM::view is permitted under Apollo action group (_all_actions)
+  {
+    tls_client client(port, &creds_view);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("status_code=\"200\""), std::string::npos);
+    EXPECT_EQ(resp.find("Permission Denied"), std::string::npos);
+  }
+
+  // 5. Client with PERM::launch is permitted
+  {
+    tls_client client(port, &creds_launch);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("status_code=\"200\""), std::string::npos);
+    EXPECT_EQ(resp.find("Permission Denied"), std::string::npos);
+  }
+
+  // 6. Client with PERM::_all is permitted
+  {
+    tls_client client(port, &creds_full);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("status_code=\"200\""), std::string::npos);
+    EXPECT_EQ(resp.find("Permission Denied"), std::string::npos);
+  }
+}
+
+TEST_F(TLSDispatchTest, ApplistReadsConfiguredAppsForAuthorizedClient) {
+  proc::ctx_t test_app {};
+  test_app.name = "CustomGame";
+  test_app.id = "42";
+  proc::proc.get_apps().push_back(std::move(test_app));
+
+  const auto creds_full = crypto::gen_creds("TLS Applist Config Full", 2048);
+  const auto creds_no = crypto::gen_creds("TLS Applist Config No", 2048);
+  ASSERT_FALSE(nvhttp::test_support::add_client("ConfigFull", creds_full.x509, true, crypto::PERM::_all).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ConfigNo", creds_no.x509, true, crypto::PERM::_no).empty());
+
+  // Authorized client receives custom configured app from apps collection
+  {
+    tls_client client(port, &creds_full);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("<AppTitle>CustomGame</AppTitle>"), std::string::npos);
+    EXPECT_NE(resp.find("<ID>42</ID>"), std::string::npos);
+    EXPECT_EQ(resp.find("Permission Denied"), std::string::npos);
+  }
+
+  // Denied client receives denial XML and does NOT enumerate custom app
+  {
+    tls_client client(port, &creds_no);
+    const auto resp = client.request("/applist");
+    EXPECT_NE(resp.find("<AppTitle>Permission Denied</AppTitle>"), std::string::npos);
+    EXPECT_NE(resp.find("<ID>114514</ID>"), std::string::npos);
+    EXPECT_EQ(resp.find("CustomGame"), std::string::npos);
+  }
+
+  proc::proc.get_apps().clear();
+}
+
+TEST_F(TLSDispatchTest, ResumePermissionMatrixEnforcesActionGating) {
+  const auto creds_no = crypto::gen_creds("TLS Resume No Perm", 2048);
+  const auto creds_list = crypto::gen_creds("TLS Resume List Only", 2048);
+  const auto creds_input = crypto::gen_creds("TLS Resume Input Only", 2048);
+  const auto creds_view = crypto::gen_creds("TLS Resume View Only", 2048);
+  const auto creds_launch = crypto::gen_creds("TLS Resume Launch Only", 2048);
+  const auto creds_full = crypto::gen_creds("TLS Resume Full Perm", 2048);
+
+  ASSERT_FALSE(nvhttp::test_support::add_client("NoPerm", creds_no.x509, true, crypto::PERM::_no).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ListOnly", creds_list.x509, true, crypto::PERM::list).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("InputOnly", creds_input.x509, true, crypto::PERM::input_kbd).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ViewOnly", creds_view.x509, true, crypto::PERM::view).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("LaunchOnly", creds_launch.x509, true, crypto::PERM::launch).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("FullPerm", creds_full.x509, true, crypto::PERM::_all).empty());
+
+  // 1. Client with PERM::_no: denied with 403 BEFORE process status check
+  {
+    tls_client client(port, &creds_no);
+    const auto resp = client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+    EXPECT_NE(resp.find("<resume>0</resume>"), std::string::npos);
+  }
+
+  // 2. Client with PERM::list (no view/launch): denied with 403
+  {
+    tls_client client(port, &creds_list);
+    const auto resp = client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+  }
+
+  // 3. Client with input only: denied with 403
+  {
+    tls_client client(port, &creds_input);
+    const auto resp = client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+  }
+
+  // 4. Client with PERM::view: passes permission check!
+  // Since no app is running in tests (current_appid == 0), handler returns 503 "No running app to resume".
+  // This confirms the request was NOT denied by permission (not 403).
+  {
+    tls_client client(port, &creds_view);
+    const auto resp = client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"503\""), std::string::npos);
+    EXPECT_NE(resp.find("No running app to resume"), std::string::npos);
+  }
+
+  // 5. Client with PERM::launch: also passes permission check (since _allow_view includes launch)
+  {
+    tls_client client(port, &creds_launch);
+    const auto resp = client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"503\""), std::string::npos);
+    EXPECT_NE(resp.find("No running app to resume"), std::string::npos);
+  }
+
+  // 6. Client with PERM::_all: passes permission check
+  {
+    tls_client client(port, &creds_full);
+    const auto resp = client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"503\""), std::string::npos);
+    EXPECT_NE(resp.find("No running app to resume"), std::string::npos);
+  }
+}
+
+TEST_F(TLSDispatchTest, LaunchPermissionMatrixEnforcesActionGating) {
+  const auto creds_no = crypto::gen_creds("TLS Launch No Perm", 2048);
+  const auto creds_list = crypto::gen_creds("TLS Launch List Only", 2048);
+  const auto creds_input = crypto::gen_creds("TLS Launch Input Only", 2048);
+  const auto creds_view = crypto::gen_creds("TLS Launch View Only", 2048);
+  const auto creds_launch = crypto::gen_creds("TLS Launch Launch Only", 2048);
+
+  ASSERT_FALSE(nvhttp::test_support::add_client("NoPerm", creds_no.x509, true, crypto::PERM::_no).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ListOnly", creds_list.x509, true, crypto::PERM::list).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("InputOnly", creds_input.x509, true, crypto::PERM::input_mouse).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("ViewOnly", creds_view.x509, true, crypto::PERM::view).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("LaunchOnly", creds_launch.x509, true, crypto::PERM::launch).empty());
+
+  // 1. Client with PERM::_no: denied with 403 BEFORE parameter check or process execution
+  {
+    tls_client client(port, &creds_no);
+    const auto resp = client.request("/launch?appid=1");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+  }
+
+  // 2. Client with PERM::list: denied with 403
+  {
+    tls_client client(port, &creds_list);
+    const auto resp = client.request("/launch?appid=1");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+  }
+
+  // 3. Client with input only: denied with 403
+  {
+    tls_client client(port, &creds_input);
+    const auto resp = client.request("/launch?appid=1");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+  }
+
+  // 4. Client with view only: launching a new app (when current_appid == 0) requires PERM::launch; denied with 403
+  {
+    tls_client client(port, &creds_view);
+    const auto resp = client.request("/launch?appid=1");
+    EXPECT_NE(resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resp.find("Permission denied"), std::string::npos);
+  }
+
+  // 5. Client with PERM::launch: passes permission check!
+  // Without test seam and without launch args, reaches missing required parameter validation (400)
+  // proving that permission check succeeded and was NOT 403.
+  {
+    tls_client client(port, &creds_launch);
+    const auto resp = client.request("/launch?appid=1");
+    EXPECT_NE(resp.find("status_code=\"400\""), std::string::npos);
+    EXPECT_NE(resp.find("Missing a required launch parameter"), std::string::npos);
+  }
+}
+
+TEST_F(TLSDispatchTest, HTTPQuerySpoofCannotOverrideTLSSnapshot) {
+  const auto creds_no = crypto::gen_creds("TLS Spoof Client", 2048);
+  ASSERT_FALSE(nvhttp::test_support::add_client("Spoofer", creds_no.x509, true, crypto::PERM::_no).empty());
+
+  // Attempt to spoof full permissions in HTTP query string for applist
+  {
+    tls_client client(port, &creds_no);
+    const auto applist_resp = client.request("/applist?perm=4294967295&permissions=4294967295&action=all");
+    EXPECT_NE(applist_resp.find("<AppTitle>Permission Denied</AppTitle>"), std::string::npos);
+  }
+
+  // Attempt to spoof permissions in HTTP query string for resume
+  {
+    tls_client client(port, &creds_no);
+    const auto resume_resp = client.request("/resume?perm=4294967295&permissions=4294967295&view=true");
+    EXPECT_NE(resume_resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(resume_resp.find("Permission denied"), std::string::npos);
+  }
+
+  // Attempt to spoof permissions in HTTP query string for launch
+  {
+    tls_client client(port, &creds_no);
+    const auto launch_resp = client.request("/launch?appid=1&perm=4294967295&permissions=4294967295&launch=true");
+    EXPECT_NE(launch_resp.find("status_code=\"403\""), std::string::npos);
+    EXPECT_NE(launch_resp.find("Permission denied"), std::string::npos);
+  }
+}
+
+TEST_F(TLSDispatchTest, LaunchPositiveExecutionThroughNarrowTestSeam) {
+  // Documented non-E2E test: verifies production launch handler parses parameters,
+  // captures authenticated principal and permissions, and responds 200 without
+  // executing live hardware encoders or spawning external processes.
+  nvhttp::test_support::skip_hardware_for_testing = true;
+
+  const auto creds_launch = crypto::gen_creds("TLS Positive Launch", 2048);
+  const auto creds_full = crypto::gen_creds("TLS Positive Full", 2048);
+
+  ASSERT_FALSE(nvhttp::test_support::add_client("LaunchPositive", creds_launch.x509, true, crypto::PERM::launch).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("FullPositive", creds_full.x509, true, crypto::PERM::_all).empty());
+
+  const std::string valid_launch_query =
+    "/launch?rikey=0123456789abcdef0123456789abcdef&rikeyid=1&localAudioPlayMode=0&appid=1";
+
+  // Permitted client with PERM::launch executes handler successfully
+  {
+    tls_client client(port, &creds_launch);
+    const auto resp = client.request(valid_launch_query);
+    EXPECT_NE(resp.find("status_code=\"200\""), std::string::npos);
+    EXPECT_NE(resp.find("<gamesession>1</gamesession>"), std::string::npos);
+  }
+
+  // Permitted client with PERM::_all executes handler successfully
+  {
+    tls_client client(port, &creds_full);
+    const auto resp = client.request(valid_launch_query);
+    EXPECT_NE(resp.find("status_code=\"200\""), std::string::npos);
+    EXPECT_NE(resp.find("<gamesession>1</gamesession>"), std::string::npos);
+  }
+}
+
+TEST_F(TLSDispatchTest, ExclusiveOwnershipNotEnforcedForResume) {
+  // Verifies existing Apollo policy: paired clients with _allow_view permission may view/resume
+  // without exclusive ownership barriers restricted to a single launching client identity.
+  const auto alice_creds = crypto::gen_creds("Alice Viewer", 2048);
+  const auto bob_creds = crypto::gen_creds("Bob Viewer", 2048);
+
+  ASSERT_FALSE(nvhttp::test_support::add_client("Alice", alice_creds.x509, true, crypto::PERM::view).empty());
+  ASSERT_FALSE(nvhttp::test_support::add_client("Bob", bob_creds.x509, true, crypto::PERM::view).empty());
+
+  // Both distinct paired identities reach the resume handler and receive 503 (no app running),
+  // proving neither is blocked by an exclusive ownership constraint.
+  {
+    tls_client alice_client(port, &alice_creds);
+    const auto resp = alice_client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"503\""), std::string::npos);
+  }
+  {
+    tls_client bob_client(port, &bob_creds);
+    const auto resp = bob_client.request("/resume");
+    EXPECT_NE(resp.find("status_code=\"503\""), std::string::npos);
+  }
 }
