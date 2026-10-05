@@ -314,7 +314,7 @@ TEST_F(InputGamepadSessionTest, SerializesArrivalAndStatePacketsForOneController
     worker.join();
     FAIL() << "Could not create independent input stream";
   }
-  input::passthrough(other_input, make_input_packet(0x12345678, sizeof(std::uint32_t), sizeof(NV_INPUT_HEADER)));
+  input::passthrough(other_input, make_input_packet(UTF8_TEXT_EVENT_MAGIC, sizeof(std::uint32_t), sizeof(NV_INPUT_HEADER)));
   EXPECT_EQ(scheduled.size(), 2);
   if (scheduled.size() == 2) {
     EXPECT_EQ(scheduled.back(), other_input);
@@ -346,10 +346,10 @@ TEST_F(InputGamepadSessionTest, YieldsAfterBoundedPacketBatch) {
     scheduled.push_back(std::move(input));
   });
 
-  constexpr std::uint32_t unknown_magic = 0x12345678;
+  constexpr std::uint32_t batch_magic = UTF8_TEXT_EVENT_MAGIC;
   constexpr std::size_t packet_count = 33;
   for (std::size_t n = 0; n < packet_count; ++n) {
-    input::passthrough(stream_input, make_input_packet(unknown_magic, sizeof(std::uint32_t), sizeof(NV_INPUT_HEADER)));
+    input::passthrough(stream_input, make_input_packet(batch_magic, sizeof(std::uint32_t), sizeof(NV_INPUT_HEADER)));
   }
   ASSERT_EQ(scheduled.size(), 1);
 

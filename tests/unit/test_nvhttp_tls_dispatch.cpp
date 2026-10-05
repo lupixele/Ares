@@ -840,3 +840,84 @@ TEST_F(TLSDispatchTest, ExclusiveOwnershipNotEnforcedForResume) {
     EXPECT_NE(resp.find("status_code=\"503\""), std::string::npos);
   }
 }
+
+TEST_F(TLSDispatchTest, PendingLaunchSessionPurgedOnTerminateSessionsByCert) {
+  const auto alice_creds = test_utils::certificates::generate_ca_credentials("Alice Pending Client");
+  const auto bob_creds = test_utils::certificates::generate_ca_credentials("Bob Pending Client");
+
+  nvhttp::test_support::add_client("AlicePending", alice_creds.x509, true, crypto::PERM::_all);
+  nvhttp::test_support::add_client("BobPending", bob_creds.x509, true, crypto::PERM::_all);
+
+  // 1. Raise a launch session for Alice
+  auto launch_alice = std::make_shared<rtsp_stream::launch_session_t>();
+  launch_alice->id = 101;
+  launch_alice->client_cert = alice_creds.x509;
+  launch_alice->perm = crypto::PERM::_all;
+  rtsp_stream::launch_session_raise(launch_alice);
+
+  ASSERT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+  EXPECT_EQ(rtsp_stream::test_support::pending_launch_session_cert(), alice_creds.x509);
+
+  // 2. Terminating Bob's sessions must NOT clear Alice's pending session
+  rtsp_stream::terminate_sessions_by_cert(bob_creds.x509);
+  EXPECT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+  EXPECT_EQ(rtsp_stream::test_support::pending_launch_session_cert(), alice_creds.x509);
+
+  // 3. Terminating Alice's sessions clears the pending session
+  rtsp_stream::terminate_sessions_by_cert(alice_creds.x509);
+  EXPECT_FALSE(rtsp_stream::test_support::has_pending_launch_session());
+
+  // 4. Server clear_all clears any pending launch session
+  auto launch_bob = std::make_shared<rtsp_stream::launch_session_t>();
+  launch_bob->id = 102;
+  launch_bob->client_cert = bob_creds.x509;
+  launch_bob->perm = crypto::PERM::_all;
+  rtsp_stream::launch_session_raise(launch_bob);
+  ASSERT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+
+  rtsp_stream::test_support::clear_all();
+  EXPECT_FALSE(rtsp_stream::test_support::has_pending_launch_session());
+}
+
+TEST_F(TLSDispatchTest, RtspAdmissionRevalidationProtectsPendingLaunchAgainstStaleEscalation) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Admission Client");
+  const auto uuid = nvhttp::test_support::add_client("AdmissionClient", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  rtsp_stream::launch_session_t session {};
+  session.id = 201;
+  session.client_cert = creds.x509;
+  session.perm = crypto::PERM::_all;  // Stale initial snapshot from earlier /launch authorization
+
+  // 1. Client disabled in registry: record shows enabled=false
+  ASSERT_TRUE(nvhttp::update_client(uuid, false, std::nullopt));
+  const auto rec_disabled = nvhttp::get_client_record(session.client_cert);
+  EXPECT_TRUE(rec_disabled.found);
+  EXPECT_FALSE(rec_disabled.enabled);
+
+  // 2. Client re-enabled but permissions reduced to mouse-only (lacks _allow_view)
+  const auto mouse_only = crypto::PERM::input_mouse;
+  ASSERT_TRUE(nvhttp::update_client(uuid, true, static_cast<uint32_t>(mouse_only)));
+  const auto rec_no_view = nvhttp::get_client_record(session.client_cert);
+  EXPECT_TRUE(rec_no_view.found);
+  EXPECT_TRUE(rec_no_view.enabled);
+  EXPECT_FALSE(bool(rec_no_view.perm & crypto::PERM::_allow_view));
+
+  // 3. Client granted view but restricted from controller: permissions revalidate to reduced snapshot
+  const auto view_mouse = crypto::PERM::view | crypto::PERM::input_mouse;
+  ASSERT_TRUE(nvhttp::update_client(uuid, true, static_cast<uint32_t>(view_mouse)));
+  const auto rec_restricted = nvhttp::get_client_record(session.client_cert);
+  EXPECT_TRUE(rec_restricted.found);
+  EXPECT_TRUE(rec_restricted.enabled);
+  EXPECT_TRUE(bool(rec_restricted.perm & crypto::PERM::_allow_view));
+  EXPECT_EQ(rec_restricted.perm, view_mouse);
+  EXPECT_FALSE(bool(rec_restricted.perm & crypto::PERM::input_controller));
+
+  // Simulating the admission step in rtsp.cpp before stream::session::alloc
+  if (!session.client_cert.empty()) {
+    const auto client_rec = nvhttp::get_client_record(session.client_cert);
+    ASSERT_TRUE(client_rec.found && client_rec.enabled && bool(client_rec.perm & crypto::PERM::_allow_view));
+    session.perm = client_rec.perm;
+  }
+  EXPECT_EQ(session.perm, view_mouse);
+}

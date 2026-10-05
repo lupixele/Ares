@@ -266,3 +266,76 @@ TEST_F(StreamInputAllocationTest, DifferentPermissionsResumeFailsOrderlyWithoutT
   // The original active input context remains intact and retains its original permissions
   EXPECT_EQ(input::get_permissions(initial_input), initial_perm);
 }
+
+/**
+ * @brief Reset on session stop releases held keyboard keys, drains queued KEYDOWN packets,
+ * and prevents unhandled presses from executing after stop.
+ */
+TEST_F(StreamInputAllocationTest, ResetReleasesHeldKeyAndDrainsQueuedKeyDownBeforeStop) {
+  const auto creds = crypto::gen_creds("Client Lifecycle Test", 2048);
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 50;
+  launch.client_cert = creds.x509;
+  launch.perm = crypto::PERM::_all_inputs;
+  launch.iv.resize(16);
+
+  stream::config_t config {};
+  auto session = stream::session::alloc(config, launch);
+  ASSERT_NE(session, nullptr);
+
+  auto input_ctx = stream::session::input(*session);
+  ASSERT_NE(input_ctx, nullptr);
+
+  std::vector<input::testing::keyboard_event_t> recorded_keys;
+  input::testing::set_keyboard_sink([&](const input::testing::keyboard_event_t &event) {
+    recorded_keys.push_back(event);
+  });
+  auto cleanup_sink = util::fail_guard([]() {
+    input::testing::set_keyboard_sink(nullptr);
+  });
+
+  // 1. Client presses key 'A' (virtual key 0x41)
+  input::testing::send_keyboard_packet(input_ctx, 0x41, 0, 0, false);
+  ASSERT_EQ(recorded_keys.size(), 1u);
+  EXPECT_FALSE(recorded_keys.back().release);
+  EXPECT_EQ(recorded_keys.back().key_code, 0x41);
+
+  // 2. Client queues a KEYDOWN packet for key 'B' (0x42) while input processing is suspended
+  NV_KEYBOARD_PACKET key_b_pkt {};
+  key_b_pkt.header.size = util::endian::big<std::uint32_t>(sizeof(key_b_pkt) - sizeof(key_b_pkt.header.size));
+  key_b_pkt.header.magic = util::endian::little(KEY_DOWN_EVENT_MAGIC);
+  key_b_pkt.keyCode = 0x42;
+  key_b_pkt.modifiers = 0;
+  key_b_pkt.flags = 0;
+
+  std::vector<std::uint8_t> key_b_bytes(sizeof(key_b_pkt));
+  std::memcpy(key_b_bytes.data(), &key_b_pkt, sizeof(key_b_pkt));
+  input::passthrough(input_ctx, std::move(key_b_bytes));
+
+  EXPECT_EQ(input::testing::queued_input_packet_count(input_ctx), 1u);
+
+  // 3. Reset input (simulating stop/join session teardown)
+  input::reset(input_ctx);
+
+  // 4. Held key 'A' must be released (KEY_UP emitted)
+  ASSERT_GE(recorded_keys.size(), 2u);
+  EXPECT_TRUE(recorded_keys.back().release);
+  EXPECT_EQ(recorded_keys.back().key_code, 0x41);
+
+  // 5. Queued key 'B' must be drained and NEVER pressed
+  EXPECT_EQ(input::testing::queued_input_packet_count(input_ctx), 0u);
+  for (const auto &ev : recorded_keys) {
+    EXPECT_NE(ev.key_code, 0x42) << "Queued key B must not have been pressed after reset";
+  }
+
+  // 6. Input context is stopped; subsequent packets cannot press keys
+  EXPECT_TRUE(input::testing::is_input_stopped(input_ctx));
+  NV_KEYBOARD_PACKET post_stop_pkt {};
+  post_stop_pkt.header.size = util::endian::big<std::uint32_t>(sizeof(post_stop_pkt) - sizeof(post_stop_pkt.header.size));
+  post_stop_pkt.header.magic = util::endian::little(KEY_DOWN_EVENT_MAGIC);
+  post_stop_pkt.keyCode = 0x43;
+  std::vector<std::uint8_t> post_stop_bytes(sizeof(post_stop_pkt));
+  std::memcpy(post_stop_bytes.data(), &post_stop_pkt, sizeof(post_stop_pkt));
+  input::passthrough(input_ctx, std::move(post_stop_bytes));
+  EXPECT_EQ(input::testing::queued_input_packet_count(input_ctx), 0u);
+}

@@ -236,6 +236,14 @@ namespace input {
      * @return Active permission mask, or PERM::_no if null.
      */
     crypto::PERM input_permissions(const std::shared_ptr<input_t> &input);
+
+    /**
+     * @brief Query whether the input context has been marked stopped.
+     *
+     * @param input Input context to query.
+     * @return True if stopped, false otherwise.
+     */
+    bool is_input_stopped(const std::shared_ptr<input_t> &input);
   }  // namespace testing
 #endif
 

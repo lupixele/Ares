@@ -27,6 +27,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "nvhttp.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -650,6 +651,11 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
+      if (all) {
+        raised_timer.cancel();
+        launch_event.pop(0s);
+      }
+
       auto lg = _session_slots.lock();
 
       for (auto i = _session_slots->begin(); i != _session_slots->end();) {
@@ -671,6 +677,12 @@ namespace rtsp_stream {
      * @param cert Certificate data or object used by the operation.
      */
     void clear_by_cert(std::string_view cert) {
+      auto pending = launch_event.view(0s);
+      if (pending && pending->client_cert == cert) {
+        raised_timer.cancel();
+        launch_event.pop(0s);
+      }
+
       auto lg = _session_slots.lock();
       for (auto i = _session_slots->begin(); i != _session_slots->end();) {
         auto &slot = *(*i);
@@ -762,13 +774,52 @@ namespace rtsp_stream {
     input::terminate_gamepads();
   }
 
+#ifdef SUNSHINE_TESTS
+  namespace {
+    std::function<void(std::string_view)> &terminate_sessions_hook() {
+      static std::function<void(std::string_view)> hook;
+      return hook;
+    }
+  }  // namespace
+#endif
+
   /**
    * @brief Terminate active sessions associated with a client certificate.
    */
   void terminate_sessions_by_cert(std::string_view cert) {
+#ifdef SUNSHINE_TESTS
+    if (const auto &hook = terminate_sessions_hook(); hook) {
+      hook(cert);
+    }
+#endif
     server.clear_by_cert(cert);
+    const auto fingerprint = crypto::cert_fingerprint(cert);
+    if (!fingerprint.empty()) {
+      input::terminate_gamepads(fingerprint);
+    }
     input::terminate_gamepads(cert);
   }
+
+#ifdef SUNSHINE_TESTS
+  namespace test_support {
+    void set_terminate_sessions_hook(std::function<void(std::string_view)> hook) {
+      terminate_sessions_hook() = std::move(hook);
+    }
+
+    bool has_pending_launch_session() {
+      return bool(server.launch_event.view(0s));
+    }
+
+    std::string pending_launch_session_cert() {
+      auto pending = server.launch_event.view(0s);
+      return pending ? pending->client_cert : std::string {};
+    }
+
+    void clear_all() {
+      server.clear(true);
+    }
+  }  // namespace test_support
+#endif
 
   /**
    * @brief Send the serialized response over the active socket.
@@ -1297,6 +1348,17 @@ namespace rtsp_stream {
 
       respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
       return;
+    }
+
+    // Revalidate client against pairing registry before production RTSP allocation / stream start
+    if (!session.client_cert.empty()) {
+      const auto client_rec = nvhttp::get_client_record(session.client_cert);
+      if (!client_rec.found || !client_rec.enabled || !bool(client_rec.perm & crypto::PERM::_allow_view)) {
+        BOOST_LOG(error) << "Rejecting RTSP PLAY: client is not authorized or lacking view permission"sv;
+        respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
+        return;
+      }
+      session.perm = client_rec.perm;
     }
 
     auto stream_session = stream::session::alloc(config, session);

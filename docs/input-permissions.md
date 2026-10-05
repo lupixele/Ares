@@ -63,9 +63,12 @@ Sunshine supports session pausing and resuming across client disconnects via `re
 
 1. **Immutable Allocation**: A session's permission mask is established when the session is first allocated via `input::alloc()` and remains immutable throughout the session lifetime.
 2. **Resume Contract**: Reuse requires the same permission snapshot. A conflicting input mask must be rejected, not silently replaced or returned with stale higher privileges. The caller must handle a rejected allocation and quiesce/reset the old session before recreation; streaming integration is still pending.
-3. **Lifecycle Termination**: Retained gamepad allocations and input states are freed upon explicit termination via `input::terminate_gamepads()` or when the application terminates.
+3. **Lifecycle Termination & Revocation Teardown**: Retained gamepad allocations and input states are freed upon explicit termination via `input::terminate_gamepads()` (keyed by certificate fingerprint) or when the application terminates.
+   - When an administrator reduces permissions (loss of `_allow_view` or any input domain) or disables a client, matched active sessions are stopped and joined, pending RTSP sessions are cancelled, and retained input contexts are destroyed.
+   - Session teardown drains `input_queue`, marks the input context stopped, quiesces the serial input worker, and emits key releases for held keyboard keys and mouse buttons.
+   - Touch contacts and pen buttons are cancelled with `LI_TOUCH_EVENT_CANCEL_ALL`.
+   - Host keyboard tracking (`key_press`) remains global across sessions; releasing held keys on reset resets host-level pressed keys.
 
-Permission reductions on active streams must eventually drain queued work and release held input before a lower-privilege context is established. This is an integration requirement, not a verified guarantee of this admin API or input-ingress slice. Touch/pen/controller cleanup and concurrency behavior still require explicit tests. The retained-context key must also be bound to an authenticated certificate rather than a caller-supplied `uniqueid`.
 
 ## Testing & Safe Mock Sinks
 

@@ -668,3 +668,38 @@ TEST_F(ClientAuthorizationTest, SaveStatePreservesExistingBytesOnAtomicWriteFail
   EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds.x509));
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds2.x509));
 }
+
+TEST_F(ClientAuthorizationTest, UpdateClientTxReturnsAtomicMetadataAndProtectsAgainstToctou) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Tx Client");
+  const auto uuid = nvhttp::test_support::add_client("Tx Client", creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(uuid.empty());
+
+  // 1. Transactional update changing enabled and reducing permissions
+  const auto reduced_perm = crypto::PERM::input_mouse | crypto::PERM::view;
+  const auto tx = nvhttp::update_client_tx(uuid, false, static_cast<uint32_t>(reduced_perm));
+
+  EXPECT_TRUE(tx.success);
+  EXPECT_TRUE(tx.client_found);
+  EXPECT_TRUE(tx.enabled_before);
+  EXPECT_FALSE(tx.enabled_after);
+  EXPECT_EQ(tx.perm_before, crypto::PERM::_all);
+  EXPECT_EQ(tx.perm_after, reduced_perm);
+  EXPECT_EQ(tx.cert, creds.x509);
+
+  // 2. Querying client record by cert retrieves verified status atomically
+  const auto rec = nvhttp::get_client_record(creds.x509);
+  EXPECT_TRUE(rec.found);
+  EXPECT_FALSE(rec.enabled);
+  EXPECT_EQ(rec.perm, reduced_perm);
+  EXPECT_EQ(rec.uuid, uuid);
+  EXPECT_EQ(rec.name, "Tx Client");
+
+  // 3. Unknown certificate returns found=false
+  const auto unknown_rec = nvhttp::get_client_record("unknown-cert");
+  EXPECT_FALSE(unknown_rec.found);
+
+  // 4. Update on unknown UUID returns client_found=false, success=false
+  const auto unknown_tx = nvhttp::update_client_tx("unknown-uuid", true, static_cast<uint32_t>(crypto::PERM::_all));
+  EXPECT_FALSE(unknown_tx.client_found);
+  EXPECT_FALSE(unknown_tx.success);
+}

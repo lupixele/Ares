@@ -127,7 +127,17 @@ Administrative mutation of client permissions and connection authorization is ex
 
 - **New Client Default**: Newly paired clients continue to default to `crypto::PERM::_all` (`119480064`) to avoid accidental client lockout before pairing policy settings are introduced.
 - **Initial-session enforcement**: Authenticated permission snapshots now reach stream input allocation and the controller, mouse, keyboard, touch and pen packet gate. `/applist` requires any `_all_actions` bit and returns Apollo's permission-denied placeholder otherwise; `/resume` requires `_allow_view`; `/launch` requires `launch`, except that a request for the already-running positive application ID uses `_allow_view` before the existing already-running response. Unsupported input-only launch behavior is not introduced.
-- **Remaining enforcement boundaries**: An administrative permission change affects subsequent HTTP dispatch and newly allocated sessions, not an already-running stream's immutable input snapshot. Permission-reduction teardown, queued-input draining and held-input cleanup remain unfinished. New pairings still default to full access. Clipboard and file-transfer permissions are separate from input packet domains and are not implemented by this slice.
+- **Live Permission-Reduction Teardown & Ingress Quiescing**:
+  - `nvhttp::update_client_tx` atomically returns transaction metadata (`cert`, `enabled_before`/`enabled_after`, `perm_before`/`perm_after`, `success`) under `client_auth_mutex()`, eliminating TOCTOU races between permission update and certificate lookup.
+  - On successful persistence, revoking `_allow_view` or ANY input domain (`input_controller`, `input_touch`, `input_pen`, `input_mouse`, `input_kbd`), or disabling the client, immediately triggers session teardown via `rtsp_stream::terminate_sessions_by_cert(cert)`.
+  - Teardown clears any pending RTSP launch session in `launch_event` for that certificate, stops and joins active streaming sessions, and destroys the client's retained input session from `retained_input_state()`.
+  - Session stop drains `input_queue`, marks the input context stopped, quiesces the serial input worker (`task_pool`), and releases all tracked held keyboard keys and mouse buttons. Active touch contacts and pen buttons receive `LI_TOUCH_EVENT_CANCEL_ALL`.
+  - RTSP admission revalidates the client against the paired registry prior to stream allocation; disabled clients or clients lacking `_allow_view` are rejected with `403 Forbidden`, and reduced permissions are synchronized to prevent stale privilege escalation.
+- **Shutdown Limits & Known Scope**:
+  - Permission grants (elevating bits) do not mutate live streams; running sessions preserve their immutable initial snapshot until reconnect.
+  - Keyboard tracking (`key_press`) remains host-global; resetting keyboard keys on session teardown releases global keys rather than per-client virtual key states.
+  - New pairings still default to full access (`crypto::PERM::_all`).
+  - Clipboard and file-transfer permissions remain outside input packet domains and are not implemented by this slice.
 - **Verification scope**: The parent independently built strict native targets and passed 108 selected tests including real loopback TLS action requests. Positive launch tests bypass encoder probing and process execution through a test-only seam after authorization; they are not live streaming acceptance. The seam is reset in fixture teardown.
 - **Re-Pair Restrictions**: Re-pairing an existing client preserves both its configured permissions and its disabled state without privilege escalation.
 

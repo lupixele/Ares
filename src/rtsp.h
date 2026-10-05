@@ -77,6 +77,36 @@ namespace rtsp_stream {
    */
   void terminate_sessions_by_cert(std::string_view cert);
 
+#ifdef SUNSHINE_TESTS
+  namespace test_support {
+    /**
+     * @brief Install a test hook invoked whenever terminate_sessions_by_cert is called.
+     *
+     * @param hook Callback receiving the client certificate string view.
+     */
+    void set_terminate_sessions_hook(std::function<void(std::string_view)> hook);
+
+    /**
+     * @brief Check whether a launch session is currently pending.
+     *
+     * @return True if a pending launch session is waiting for RTSP connection.
+     */
+    bool has_pending_launch_session();
+
+    /**
+     * @brief Query the client certificate of the pending launch session if any.
+     *
+     * @return PEM certificate of the pending launch session, or empty string.
+     */
+    std::string pending_launch_session_cert();
+
+    /**
+     * @brief Clear all RTSP server sessions and pending launch events for testing.
+     */
+    void clear_all();
+  }  // namespace test_support
+#endif
+
   /**
    * @brief Runs the RTSP server loop.
    */

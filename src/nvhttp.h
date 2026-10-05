@@ -364,6 +364,30 @@ namespace nvhttp {
   bool set_client_enabled(std::string_view uuid, bool enabled);
 
   /**
+   * @brief Result of an atomic client configuration update transaction.
+   */
+  struct client_update_result_t {
+    bool success {false};  ///< True if the client was found and changes persisted to disk.
+    bool client_found {false};  ///< True if the UUID matched a paired client in the registry.
+    bool enabled_before {false};  ///< Client enabled status before update.
+    bool enabled_after {false};  ///< Client enabled status after update (or rolled back).
+    crypto::PERM perm_before {crypto::PERM::_no};  ///< Client permission mask before update.
+    crypto::PERM perm_after {crypto::PERM::_no};  ///< Client permission mask after update (or rolled back).
+    std::string cert;  ///< Client PEM certificate retrieved under the registry lock.
+  };
+
+  /**
+   * @brief Paired client record retrieved atomically under registry lock.
+   */
+  struct client_record_t {
+    bool found {false};  ///< Whether the client exists in the registry.
+    bool enabled {false};  ///< Whether the client is allowed to connect.
+    crypto::PERM perm {crypto::PERM::_no};  ///< Active permissions assigned to the client.
+    std::string name;  ///< Friendly client device name.
+    std::string uuid;  ///< Stable client UUID.
+  };
+
+  /**
    * @brief Update permissions for a paired client identified by UUID.
    *
    * Masks unrecognized bits against crypto::PERM::_all and persists state.
@@ -374,6 +398,16 @@ namespace nvhttp {
    * @return True if the client was found and permissions were updated and persisted, false otherwise.
    */
   bool update_client_permissions(std::string_view uuid, uint32_t perm);
+
+  /**
+   * @brief Update paired client configuration with transaction metadata under registry lock.
+   *
+   * @param uuid Unique ID of the client to update.
+   * @param enabled Optional new enabled state. If omitted, existing enabled state is preserved.
+   * @param perm Optional new permission bitmask. If omitted, existing permissions are preserved.
+   * @return Transaction result containing success status, before/after flags, and paired certificate.
+   */
+  client_update_result_t update_client_tx(std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm);
 
   /**
    * @brief Update enabled state and/or permissions for a paired client identified by UUID.
@@ -387,6 +421,14 @@ namespace nvhttp {
    * @return True if the client was found and updated, false otherwise.
    */
   bool update_client(std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm);
+
+  /**
+   * @brief Query client authorization and permission record by client certificate.
+   *
+   * @param cert_pem Client PEM certificate.
+   * @return Record with found flag, enabled status, active permissions, friendly name, and UUID.
+   */
+  client_record_t get_client_record(std::string_view cert_pem);
   /**
    * @brief Get cert by UUID.
    *

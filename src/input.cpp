@@ -333,6 +333,7 @@ namespace input {
     std::list<std::vector<uint8_t>> input_queue;  ///< Validated input packets waiting for processing.
     std::mutex input_queue_lock;  ///< Input queue lock.
     bool input_task_scheduled {};  ///< Whether one worker task owns packet dispatch for this stream; guarded by input_queue_lock.
+    bool stopped {};  ///< Set to true on reset/stop to drain and reject subsequent packet dispatch; guarded by input_queue_lock.
 
     thread_pool_util::ThreadPool::task_id_t mouse_left_button_timeout;  ///< Mouse left button timeout.
 
@@ -2098,8 +2099,8 @@ namespace input {
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
 
-      // If all entries have already been processed, nothing to do
-      if (input->input_queue.empty()) {
+      // If all entries have already been processed, or stream input is stopped, nothing to do
+      if (input->stopped || input->input_queue.empty()) {
         input->input_task_scheduled = false;
         return false;
       }
@@ -2304,6 +2305,12 @@ namespace input {
     bool schedule_task = false;
     {
       std::lock_guard lock {input->input_queue_lock};
+      if (input->stopped) {
+        BOOST_LOG(debug)
+          << "Dropping input packet ["sv << util::hex(magic).to_string_view()
+          << "]: stream input is stopped"sv;
+        return;
+      }
       input->input_queue.push_back(std::move(input_data));
       if (!input->input_task_scheduled) {
         input->input_task_scheduled = true;
@@ -2398,6 +2405,15 @@ namespace input {
     reset_mouse_buttons();
     reset_keyboard_keys();
     reset_gamepads(input);
+    if (input && input->client_context) {
+      platf::touch_input_t touch {};
+      touch.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+      platf::touch_update(input->client_context.get(), input->touch_port, touch);
+
+      platf::pen_input_t pen {};
+      pen.eventType = LI_TOUCH_EVENT_CANCEL_ALL;
+      platf::pen_update(input->client_context.get(), input->touch_port, pen);
+    }
   }
 
   /**
@@ -2410,8 +2426,23 @@ namespace input {
     task_pool.cancel(key_press_repeat_id);
     task_pool.cancel(input->mouse_left_button_timeout);
 
-    // Ensure input is synchronous, by using the task_pool
-    task_pool.push(reset_input_state, input);
+    // Drain queued input packets immediately so unhandled presses are discarded before stop
+    {
+      std::lock_guard lock {input->input_queue_lock};
+      input->stopped = true;
+      input->input_queue.clear();
+      input->input_task_scheduled = false;
+    }
+
+    // Quiesce serial input worker and reset all pressed input states
+    if (task_pool.running()) {
+      auto fut = task_pool.push([input]() {
+        reset_input_state(input);
+      });
+      fut.wait();
+    } else {
+      reset_input_state(input);
+    }
   }
 
   void terminate_gamepads() {
@@ -2643,6 +2674,15 @@ namespace input {
 
     crypto::PERM input_permissions(const std::shared_ptr<input_t> &input) {
       return get_permissions(input);
+    }
+
+    bool is_input_stopped(const std::shared_ptr<input_t> &input) {
+      if (!input) {
+        return false;
+      }
+
+      std::lock_guard lock {input->input_queue_lock};
+      return input->stopped;
     }
   }  // namespace testing
 #endif

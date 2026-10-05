@@ -2037,17 +2037,23 @@ namespace nvhttp {
   }
 
   /**
-   * @brief Update paired client configuration (enabled state and/or permissions).
+   * @brief Update paired client configuration with transaction metadata under registry lock.
    *
    * @param uuid Unique ID of the client to update.
    * @param enabled Optional new enabled state. If omitted, existing state is preserved.
    * @param perm Optional new permission bitmask. If omitted, existing permissions are preserved.
-   * @return True if client was found and changes persisted; false on unknown client or write failure.
+   * @return Transaction result containing success status, before/after flags, and paired certificate.
    */
-  bool update_client(const std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm) {
+  client_update_result_t update_client_tx(const std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm) {
     std::lock_guard lock {client_auth_mutex()};
     for (auto &named_cert : client_root.named_devices) {
       if (named_cert.uuid == uuid) {
+        client_update_result_t result {};
+        result.client_found = true;
+        result.cert = named_cert.cert;
+        result.enabled_before = named_cert.enabled;
+        result.perm_before = named_cert.perm;
+
         const auto old_enabled = named_cert.enabled;
         const auto old_perm = named_cert.perm;
         bool changed_enabled = false;
@@ -2068,13 +2074,31 @@ namespace nvhttp {
           if (changed_enabled) {
             rebuild_client_cert_chain();
           }
-          return false;
+          result.success = false;
+          result.enabled_after = old_enabled;
+          result.perm_after = old_perm;
+          return result;
         }
 
-        return true;
+        result.success = true;
+        result.enabled_after = named_cert.enabled;
+        result.perm_after = named_cert.perm;
+        return result;
       }
     }
-    return false;
+    return {};
+  }
+
+  /**
+   * @brief Update paired client configuration (enabled state and/or permissions).
+   *
+   * @param uuid Unique ID of the client to update.
+   * @param enabled Optional new enabled state. If omitted, existing state is preserved.
+   * @param perm Optional new permission bitmask. If omitted, existing permissions are preserved.
+   * @return True if client was found and changes persisted; false on unknown client or write failure.
+   */
+  bool update_client(const std::string_view uuid, std::optional<bool> enabled, std::optional<uint32_t> perm) {
+    return update_client_tx(uuid, enabled, perm).success;
   }
 
   /**
@@ -2113,14 +2137,28 @@ namespace nvhttp {
   }
 
   /**
+   * @brief Query client authorization and permission record by client certificate.
+   *
+   * @param cert_pem Client PEM certificate.
+   * @return Record with found flag, enabled status, active permissions, friendly name, and UUID.
+   */
+  client_record_t get_client_record(const std::string_view cert_pem) {
+    std::lock_guard lock {client_auth_mutex()};
+    for (const auto &named_cert : client_root.named_devices) {
+      if (named_cert.cert == cert_pem) {
+        return {true, named_cert.enabled, named_cert.perm, named_cert.name, named_cert.uuid};
+      }
+    }
+    return {};
+  }
+
+  /**
    * @brief Check whether a paired client certificate is allowed to connect and return its friendly name.
    */
   std::pair<bool, std::string> get_client_status(const std::string_view cert_pem) {
-    const client_t &client = client_root;
-    for (const auto &named_cert : client.named_devices) {
-      if (named_cert.cert == cert_pem) {
-        return {named_cert.enabled, named_cert.name};
-      }
+    const auto rec = get_client_record(cert_pem);
+    if (rec.found) {
+      return {rec.enabled, rec.name};
     }
     return {true, {}};
   }

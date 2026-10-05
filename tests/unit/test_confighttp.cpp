@@ -34,6 +34,7 @@
 #include <src/httpcommon.h>
 #include <src/network.h>
 #include <src/nvhttp.h>
+#include <src/rtsp.h>
 #include <src/utility.h>
 
 using namespace std::literals;
@@ -2321,6 +2322,85 @@ TEST_F(ConfigHttpClientManagementTest, UpdateClientRollsBackInMemoryStateOnPersi
   EXPECT_EQ(retry_response->status_code, "200 OK");
   EXPECT_TRUE(nlohmann::json::parse(retry_response->content.string()).value("status", false));
   EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+}
+
+/**
+ * @brief Live administrative permission reduction triggers session termination for matched certificate.
+ */
+TEST_F(ConfigHttpClientManagementTest, PermissionReductionTriggersSessionTeardownForMatchedCert) {
+  const auto alice_creds = test_utils::certificates::generate_ca_credentials("Alice Client");
+  const auto bob_creds = test_utils::certificates::generate_ca_credentials("Bob Client");
+
+  const auto alice_uuid = nvhttp::test_support::add_client("Alice", alice_creds.x509, true, crypto::PERM::_all);
+  const auto bob_uuid = nvhttp::test_support::add_client("Bob", bob_creds.x509, true, crypto::PERM::_all);
+  ASSERT_FALSE(alice_uuid.empty());
+  ASSERT_FALSE(bob_uuid.empty());
+
+  std::vector<std::string> terminated_certs;
+  rtsp_stream::test_support::set_terminate_sessions_hook([&](std::string_view cert) {
+    terminated_certs.emplace_back(cert);
+  });
+  auto cleanup_hook = util::fail_guard([]() {
+    rtsp_stream::test_support::set_terminate_sessions_hook(nullptr);
+  });
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+
+  // 1. Revoking an input domain (e.g. keyboard) must trigger session termination for Alice only
+  const auto reduced_perm = crypto::PERM::_all & ~crypto::PERM::input_kbd;
+  const auto resp1 = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":{}}})", alice_uuid, static_cast<uint32_t>(reduced_perm)),
+    headers
+  );
+  EXPECT_EQ(resp1->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(resp1->content.string()).value("status", false));
+
+  ASSERT_EQ(terminated_certs.size(), 1u);
+  EXPECT_EQ(terminated_certs[0], alice_creds.x509);
+  terminated_certs.clear();
+
+  // 2. Granting a permission (or no change) must NOT trigger session termination
+  const auto elevated_perm = reduced_perm | crypto::PERM::input_kbd;
+  const auto resp2 = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":{}}})", alice_uuid, static_cast<uint32_t>(elevated_perm)),
+    headers
+  );
+  EXPECT_EQ(resp2->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(resp2->content.string()).value("status", false));
+  EXPECT_TRUE(terminated_certs.empty());
+
+  // 3. Revoking view permission entirely (_allow_view lost) must trigger session termination
+  const auto no_view_perm = crypto::PERM::input_mouse | crypto::PERM::input_kbd;
+  const auto resp3 = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":{}}})", alice_uuid, static_cast<uint32_t>(no_view_perm)),
+    headers
+  );
+  EXPECT_EQ(resp3->status_code, "200 OK");
+  EXPECT_TRUE(nlohmann::json::parse(resp3->content.string()).value("status", false));
+  ASSERT_EQ(terminated_certs.size(), 1u);
+  EXPECT_EQ(terminated_certs[0], alice_creds.x509);
+  terminated_certs.clear();
+
+  // 4. Persistence failure must NOT trigger teardown or mutate permissions
+  config::nvhttp.file_state = (test_web_dir / "nonexistent" / "dir" / "bad.json").string();
+  const auto resp4 = client->request(
+    "POST",
+    "/api/clients/update",
+    std::format(R"({{"uuid":"{}","perm":0}})", bob_uuid),
+    headers
+  );
+  EXPECT_EQ(resp4->status_code, "200 OK");
+  EXPECT_FALSE(nlohmann::json::parse(resp4->content.string()).value("status", true));
+  EXPECT_TRUE(terminated_certs.empty());
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(bob_uuid), crypto::PERM::_all);
 }
 
 /**

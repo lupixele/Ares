@@ -1431,20 +1431,27 @@ namespace confighttp {
       }
 
       nlohmann::json output_tree;
-      const bool success = nvhttp::update_client(uuid, enabled_opt, perm_opt);
-      output_tree["status"] = success;
-      if (!success) {
+      const auto tx = nvhttp::update_client_tx(uuid, enabled_opt, perm_opt);
+      output_tree["status"] = tx.success;
+      if (!tx.success) {
         output_tree["error"] = "Client not found or failed to persist state";
       }
 
-      if (success && enabled_opt.has_value() && !*enabled_opt) {
-        auto cert = nvhttp::get_cert_by_uuid(uuid);
-        if (!cert.empty()) {
-          rtsp_stream::terminate_sessions_by_cert(cert);
-        }
+      if (tx.success) {
+        const bool disabled_loss = enabled_opt.has_value() && !tx.enabled_after;
+        const bool perm_loss = perm_opt.has_value() && (
+          !bool(tx.perm_after & crypto::PERM::_allow_view) ||
+          bool((tx.perm_before & ~tx.perm_after) & (crypto::PERM::_allow_view | crypto::PERM::_all_inputs))
+        );
 
-        if (rtsp_stream::session_count() == 0 && proc::proc.running() > 0) {
-          proc::proc.terminate();
+        if (disabled_loss || perm_loss) {
+          if (!tx.cert.empty()) {
+            rtsp_stream::terminate_sessions_by_cert(tx.cert);
+          }
+
+          if (rtsp_stream::session_count() == 0 && proc::proc.running() > 0) {
+            proc::proc.terminate();
+          }
         }
       }
 
