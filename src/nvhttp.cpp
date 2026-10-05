@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <format>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -324,7 +325,13 @@ namespace nvhttp {
       }
       root.add_child("root.named_devices"s, named_cert_nodes);
 
-      pt::write_json(config::nvhttp.file_state, root);
+      std::ostringstream ss;
+      pt::write_json(ss, root);
+
+      if (file_handler::write_file_atomic(config::nvhttp.file_state, ss.str()) != 0) {
+        BOOST_LOG(error) << "Couldn't persist state to "sv << config::nvhttp.file_state;
+        return false;
+      }
       return true;
     } catch (std::exception &e) {
       BOOST_LOG(error) << "Couldn't persist state to "sv << config::nvhttp.file_state << ": "sv << e.what();

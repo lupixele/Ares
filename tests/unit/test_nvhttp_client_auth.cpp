@@ -15,6 +15,7 @@
 
 // local includes
 #include <src/config.h>
+#include <src/file_handler.h>
 #include <src/nvhttp.h>
 
 namespace fs = std::filesystem;
@@ -638,4 +639,32 @@ TEST_F(ClientAuthorizationTest, ExactCertificateCompareDistinguishesClientsDurin
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds_a.x509));
   EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid_b), crypto::PERM::_all);
   EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds_b.x509));
+}
+
+TEST_F(ClientAuthorizationTest, SaveStatePreservesExistingBytesOnAtomicWriteFailure) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Pre-existing Client");
+  const auto uuid = nvhttp::test_support::add_client("Pre-existing Client", creds.x509, true, crypto::PERM::input_controller);
+  ASSERT_FALSE(uuid.empty());
+
+  const auto original_bytes = file_handler::read_file(config::nvhttp.file_state.c_str());
+  ASSERT_FALSE(original_bytes.empty());
+
+  // Inject atomic write failure before replacement
+  file_handler::test_support::set_failure_injection(file_handler::test_support::FailStage::BeforeReplacement);
+
+  const auto creds2 = test_utils::certificates::generate_ca_credentials("Second Client");
+  const auto uuid2 = nvhttp::test_support::add_client("Second Client", creds2.x509, true, crypto::PERM::_all);
+  file_handler::test_support::reset_failure_injection();
+
+  // On-disk state file MUST remain intact with exact original bytes
+  const auto current_bytes = file_handler::read_file(config::nvhttp.file_state.c_str());
+  EXPECT_EQ(current_bytes, original_bytes);
+
+  // Reload state from disk to confirm clean recovery of persistent state
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::input_controller);
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds2.x509));
 }

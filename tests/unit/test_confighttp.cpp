@@ -30,6 +30,7 @@
 #include <src/config.h>
 #include <src/confighttp.h>
 #include <src/crypto.h>
+#include <src/file_handler.h>
 #include <src/httpcommon.h>
 #include <src/network.h>
 #include <src/nvhttp.h>
@@ -2320,4 +2321,38 @@ TEST_F(ConfigHttpClientManagementTest, UpdateClientRollsBackInMemoryStateOnPersi
   EXPECT_EQ(retry_response->status_code, "200 OK");
   EXPECT_TRUE(nlohmann::json::parse(retry_response->content.string()).value("status", false));
   EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_all);
+}
+
+/**
+ * @brief A failed staged write cannot reactivate a disabled client or persist elevated permissions.
+ */
+TEST_F(ConfigHttpClientManagementTest, FailedAtomicUpdatePreservesDisabledClientAndDiskBytes) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Atomic Rollback Client");
+  const auto uuid = nvhttp::test_support::add_client("Atomic Rollback Client", creds.x509, false, crypto::PERM::_no);
+  ASSERT_FALSE(uuid.empty());
+  const auto original_bytes = file_handler::read_file(state_file);
+  ASSERT_FALSE(original_bytes.empty());
+  ASSERT_FALSE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+
+  SimpleWeb::CaseInsensitiveMultimap headers;
+  headers.emplace("Authorization", create_auth_header("testuser", "testpass"));
+  headers.emplace("Content-Type", "application/json");
+  file_handler::test_support::set_failure_injection(file_handler::test_support::FailStage::BeforeReplacement);
+  auto restore_injection = util::fail_guard([] { file_handler::test_support::reset_failure_injection(); });
+
+  const auto response = client->request(
+    "POST", "/api/clients/update",
+    std::format(R"({{"uuid":"{}","enabled":true,"perm":{}}})", uuid, static_cast<uint32_t>(crypto::PERM::_all)),
+    headers
+  );
+  ASSERT_EQ(response->status_code, "200 OK");
+  EXPECT_FALSE(nlohmann::json::parse(response->content.string()).value("status", true));
+  EXPECT_EQ(file_handler::read_file(state_file), original_bytes);
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_no);
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds.x509));
+
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+  EXPECT_EQ(nvhttp::test_support::get_client_perm(uuid), crypto::PERM::_no);
+  EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(creds.x509));
 }

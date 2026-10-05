@@ -128,3 +128,20 @@ Administrative mutation of client permissions and connection authorization is ex
 - **New Client Default**: Newly paired clients continue to default to `crypto::PERM::_all` (`119480064`) to avoid accidental client lockout before pairing policy settings are introduced.
 - **Enforcement Readiness**: Administrative mutation paths are now established, persistence-backed, and verified. However, runtime input interception gating (gamepad, keyboard, mouse, touch, clipboard) and runtime action gating (`/launch`, `/resume`, `/applist`) remain separate subsequent slices. Restricting permissions via the admin API persists the configuration correctly and updates request principals, but does not yet block streaming input or actions at runtime.
 - **Re-Pair Restrictions**: Re-pairing an existing client preserves both its configured permissions and its disabled state without privilege escalation.
+
+## Atomic Persistence and Filesystem Boundary Guarantees
+
+Paired-client registry persistence through `nvhttp::save_state()` now uses `file_handler::write_file_atomic`. Other configuration/application-file writers are unchanged by this slice and are not covered by these guarantees:
+
+- **Windows Same-Volume Rename Strategy**:
+  - Replaces target files via `MoveFileExW(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` on the same volume. Cross-volume copies (`MOVEFILE_COPY_ALLOWED`) and intermediate target deletion are prohibited to prevent data loss.
+   - Queries the existing target's DACL via `GetFileSecurityW(DACL_SECURITY_INFORMATION)` and supplies the returned descriptor, including its control flags, when exclusively creating the staged file. The restrictive protected-DACL fixture verifies that replacement does not broaden that DACL. This does not constitute an exhaustive ACL or adversarial-directory-race audit.
+  - Newly created target files adhere to parent directory inheritance rules.
+  - Note: NTFS alternate data streams and creation timestamps are not preserved by rename (unlike `ReplaceFileW`).
+- **POSIX Secure Staging and Mode Preservation**:
+  - Creates temporary files exclusively with mode `0600` (`S_IRUSR | S_IWUSR`) via `open(..., O_CREAT | O_EXCL, 0600)` to ensure sensitive state data is never readable by other users during staging.
+  - Enforces write loop error checks (failing on 0-byte writes and retrying on `EINTR`), flushes data with `fsync()`, restores target permission bits via `fchmod()` prior to commit, and renames atomically via `rename()`.
+  - File ownership (UID/GID) and umask restrictions are bounded by standard OS capability limits; full metadata preservation is not claimed.
+- **Fail-Closed Target Validation & Exception Safety**:
+  - Validates that target paths are regular non-reparse, non-symlink, non-directory files (`GetFileAttributesW` / `symlink_status` on Windows, `lstat` on POSIX). Rejects directory or symlink targets immediately without modifications.
+  - Uses noexcept RAII guards (`HandleGuard` / `FdGuard` and `TempCleanupGuard` holding path by reference) to ensure all descriptors are closed and temporary files unlinked on any failure or exception without throwing.
