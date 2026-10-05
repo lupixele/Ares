@@ -2351,6 +2351,10 @@ namespace stream {
       session->client_cert = launch_session.client_cert;
       session->permissions = launch_session.perm;
       session->input_session_id = launch_session.client_cert.empty() ? std::string {} : crypto::cert_fingerprint(launch_session.client_cert);
+      if (!launch_session.client_cert.empty() && session->input_session_id.empty()) {
+        BOOST_LOG(error) << "Client certificate fingerprint failed; rejecting stream allocation"sv;
+        return nullptr;
+      }
 
       session->input = input::alloc(mail, session->input_session_id, session->permissions);
       if (!session->input) {

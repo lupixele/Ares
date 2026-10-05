@@ -104,6 +104,18 @@ TEST_F(StreamInputAllocationTest, ProductionStreamAllocCapturesPermissionsAndDer
 }
 
 /**
+ * @brief A supplied malformed certificate cannot fall back to an anonymous input context.
+ */
+TEST_F(StreamInputAllocationTest, MalformedCertificateRejectsStreamAllocation) {
+  rtsp_stream::launch_session_t launch {};
+  launch.client_cert = "not a PEM certificate";
+  launch.perm = crypto::PERM::_all;
+  launch.iv.resize(16);
+  stream::config_t config {};
+  EXPECT_EQ(stream::session::alloc(config, launch), nullptr);
+}
+
+/**
  * @brief Verify that input packets are permitted or blocked based on the allocated permission mask.
  */
 TEST_F(StreamInputAllocationTest, InputGatingThroughProductionAllocation) {
