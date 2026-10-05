@@ -14,6 +14,7 @@
 #include <vector>
 
 // local includes
+#include "crypto.h"
 #include "platform/common.h"
 #include "thread_safe.h"
 
@@ -49,9 +50,29 @@ namespace input {
   void terminate_gamepads(std::string_view session_id);
 
   /**
-   * @brief Queue a raw input message for platform passthrough.
+   * @brief Queue a raw input message for platform passthrough using the session's allocated permission mask.
+   *
+   * @param input Shared stream input state.
+   * @param input_data Raw input message bytes.
    */
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data);
+
+  /**
+   * @brief Queue a raw input message for platform passthrough with an explicit client permission mask.
+   *
+   * @param input Shared stream input state.
+   * @param input_data Raw input message bytes.
+   * @param permission Client permission mask snapshot to enforce.
+   */
+  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission);
+
+  /**
+   * @brief Get the active permission mask assigned to the stream input context.
+   *
+   * @param input Stream input context.
+   * @return Active permission mask, or PERM::_no if null.
+   */
+  crypto::PERM get_permissions(const std::shared_ptr<input_t> &input);
 
   /**
    * @brief Initialize global input resources and platform backends.
@@ -76,13 +97,23 @@ namespace input {
   void refresh_virtual_input();
 
   /**
-   * @brief Allocate and initialize platform input state for a stream.
+   * @brief Allocate and initialize platform input state for a stream with a paired session identifier.
    *
    * @param mail Mailbox used to exchange messages with worker threads.
    * @param session_id Stable paired-client identity shared by launch and resume connections.
+   * @param permissions Client permission bitmask snapshot (defaults to full input permissions).
+   * @return Shared input state, or null if a retained context has a conflicting input permission snapshot.
+   */
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id, crypto::PERM permissions = crypto::PERM::_all_inputs);
+
+  /**
+   * @brief Allocate and initialize platform input state for a stream without persistent session retention.
+   *
+   * @param mail Mailbox used to exchange messages with worker threads.
+   * @param permissions Client permission bitmask snapshot (defaults to full input permissions).
    * @return Shared input state bound to the stream mailbox.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions = crypto::PERM::_all_inputs);
 
 #ifdef SUNSHINE_TESTS
   namespace testing {
@@ -131,6 +162,14 @@ namespace input {
      * @param input Retained stream input state.
      */
     void process_queued_messages(std::shared_ptr<input_t> input);
+
+    /**
+     * @brief Process a single queued input packet synchronously on the calling thread in a test.
+     *
+     * @param input Retained stream input state.
+     * @return True if a message was dequeued and processed, false if the queue was empty.
+     */
+    bool process_next_message_sync(std::shared_ptr<input_t> input);
 
     /**
      * @brief Keyboard event Sunshine emitted toward the platform backend.
@@ -189,6 +228,14 @@ namespace input {
      * @return Number of queued packets, or zero for an empty input pointer.
      */
     std::size_t queued_input_packet_count(const std::shared_ptr<input_t> &input);
+
+    /**
+     * @brief Query the active permission mask assigned to the input context.
+     *
+     * @param input Input context to query.
+     * @return Active permission mask, or PERM::_no if null.
+     */
+    crypto::PERM input_permissions(const std::shared_ptr<input_t> &input);
   }  // namespace testing
 #endif
 

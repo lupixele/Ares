@@ -18,6 +18,7 @@ extern "C" {
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -296,14 +297,17 @@ namespace input {
      *
      * @param touch_port_event Event carrying the active touch port.
      * @param feedback_queue Queue used for controller feedback.
+     * @param permissions Client permission bitmask snapshot (defaults to full input permissions).
      */
     input_t(
       safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event,
-      platf::feedback_queue_t feedback_queue
+      platf::feedback_queue_t feedback_queue,
+      crypto::PERM permissions = crypto::PERM::_all_inputs
     ):
         shortcutFlags {},
         gamepads(MAX_GAMEPADS),
         client_context {platf::allocate_client_input_context(platf_input)},
+        permissions {permissions & crypto::PERM::_all_inputs},
         touch_port_event {std::move(touch_port_event)},
         feedback_queue {std::move(feedback_queue)},
         mouse_left_button_timeout {},
@@ -321,6 +325,7 @@ namespace input {
 
     std::vector<gamepad_t> gamepads;  ///< Virtual gamepad slots tracked for the stream.
     std::unique_ptr<platf::client_input_t> client_context;  ///< Client context.
+    const crypto::PERM permissions;  ///< Immutable client input permissions for this session.
 
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;  ///< Touch port event.
     platf::feedback_queue_t feedback_queue;  ///< Queue used to deliver controller feedback to the platform backend.
@@ -2208,11 +2213,51 @@ namespace input {
   }
 
   /**
-   * @brief Called on the control stream thread to queue an input message.
+   * @brief Map an input packet magic identifier to its required permission domain bit.
+   *
+   * @param magic Host-endian packet magic.
+   * @return Required permission bit, or nullopt if unknown or unmapped.
+   */
+  constexpr std::optional<crypto::PERM> required_permission_for_magic(std::uint32_t magic) noexcept {
+    switch (magic) {
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+      case SS_CONTROLLER_ARRIVAL_MAGIC:
+      case SS_CONTROLLER_TOUCH_MAGIC:
+      case SS_CONTROLLER_MOTION_MAGIC:
+      case SS_CONTROLLER_BATTERY_MAGIC:
+        return crypto::PERM::input_controller;
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+      case MOUSE_MOVE_ABS_MAGIC:
+      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
+      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+      case SCROLL_MAGIC_GEN5:
+      case SS_HSCROLL_MAGIC:
+        return crypto::PERM::input_mouse;
+      case KEY_DOWN_EVENT_MAGIC:
+      case KEY_UP_EVENT_MAGIC:
+      case UTF8_TEXT_EVENT_MAGIC:
+        return crypto::PERM::input_kbd;
+      case SS_TOUCH_MAGIC:
+        return crypto::PERM::input_touch;
+      case SS_PEN_MAGIC:
+        return crypto::PERM::input_pen;
+      default:
+        return std::nullopt;
+    }
+  }
+
+  /**
+   * @brief Called on the control stream thread to queue an input message with an explicit permission mask snapshot.
+   *
    * @param input The input context pointer.
    * @param input_data The input message.
+   * @param permission Client permission mask snapshot to enforce in intersection with session permissions.
    */
-  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data) {
+  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission) {
+    if (!input) {
+      return;
+    }
+
     NV_INPUT_HEADER header {};
     if (!validate_input_packet(input_data, &header)) {
       if (input_data.size() >= sizeof(header)) {
@@ -2224,6 +2269,35 @@ namespace input {
       } else {
         BOOST_LOG(warning) << "Dropping malformed input packet with actual size ["sv << input_data.size() << ']';
       }
+      return;
+    }
+
+    const auto magic = util::endian::little(header.magic);
+    const auto required_perm = required_permission_for_magic(magic);
+    if (!required_perm) {
+      BOOST_LOG(warning)
+        << "Dropping input packet with unknown/disallowed magic ["sv
+        << util::hex(magic).to_string_view() << ']';
+      return;
+    }
+
+    // Effective permission mask is the intersection of session permissions and per-call snapshot
+    const auto effective_permission = permission & input->permissions;
+
+    // Check if any input permissions exist at all
+    if (!bool(effective_permission & crypto::PERM::_all_inputs)) {
+      BOOST_LOG(debug)
+        << "Dropping input packet ["sv << util::hex(magic).to_string_view()
+        << "]: client has no input permissions";
+      return;
+    }
+
+    // Check if the specific required permission bit is granted
+    if (!bool(effective_permission & *required_perm)) {
+      BOOST_LOG(debug)
+        << "Dropping input packet ["sv << util::hex(magic).to_string_view()
+        << "]: missing required permission ["sv
+        << util::hex(static_cast<std::uint32_t>(*required_perm)).to_string_view() << ']';
       return;
     }
 
@@ -2239,6 +2313,29 @@ namespace input {
     if (schedule_task) {
       schedule_input_packet_task(input);
     }
+  }
+
+  /**
+   * @brief Called on the control stream thread to queue an input message using the session's allocated permission mask.
+   *
+   * @param input The input context pointer.
+   * @param input_data The input message.
+   */
+  void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data) {
+    if (!input) {
+      return;
+    }
+    passthrough(input, std::move(input_data), input->permissions);
+  }
+
+  /**
+   * @brief Get the active permission mask assigned to the stream input context.
+   *
+   * @param input Stream input context.
+   * @return Active permission mask, or PERM::_no if null.
+   */
+  crypto::PERM get_permissions(const std::shared_ptr<input_t> &input) {
+    return input ? input->permissions : crypto::PERM::_no;
   }
 
   /**
@@ -2402,24 +2499,36 @@ namespace input {
   }
 
   /**
-   * @brief Allocate and initialize platform input state for a stream.
+   * @brief Allocate and initialize platform input state for a stream with a paired session identifier.
+   *
+   * @param mail Mailbox used to exchange messages with worker threads.
+   * @param session_id Stable paired-client identity shared by launch and resume connections.
+   * @param permissions Client permission bitmask snapshot (defaults to full input permissions).
+   * @return Shared input state bound to the stream mailbox.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id, crypto::PERM permissions) {
     std::shared_ptr<input_t> input;
     bool resumed = false;
     {
       auto &state = retained_input_state();
       std::lock_guard lock {state.mutex};
-      const auto iter = state.inputs.find(session_id);
+      const auto iter = session_id.empty() ? state.inputs.end() : state.inputs.find(session_id);
       if (iter != state.inputs.end()) {
+        if (iter->second->permissions != (permissions & crypto::PERM::_all_inputs)) {
+          BOOST_LOG(warning) << "Retained input permission snapshot changed; session reset is required before reuse";
+          return {};
+        }
         input = iter->second;
         resumed = true;
       } else {
         input = std::make_shared<input_t>(
           mail->event<input::touch_port_t>(mail::touch_port),
-          mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
+          mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback),
+          permissions
         );
-        state.inputs.try_emplace(std::move(session_id), input);
+        if (!session_id.empty()) {
+          state.inputs.try_emplace(std::move(session_id), input);
+        }
       }
     }
 
@@ -2437,6 +2546,17 @@ namespace input {
                           100ms);
 
     return input;
+  }
+
+  /**
+   * @brief Allocate and initialize platform input state for a stream without persistent session retention.
+   *
+   * @param mail Mailbox used to exchange messages with worker threads.
+   * @param permissions Client permission bitmask snapshot (defaults to full input permissions).
+   * @return Shared input state bound to the stream mailbox.
+   */
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, crypto::PERM permissions) {
+    return alloc(std::move(mail), std::string {}, permissions);
   }
 
 #ifdef SUNSHINE_TESTS
@@ -2468,6 +2588,13 @@ namespace input {
 
     void process_queued_messages(std::shared_ptr<input_t> input) {
       ::input::passthrough_queued_messages(std::move(input));
+    }
+
+    bool process_next_message_sync(std::shared_ptr<input_t> input) {
+      if (!input) {
+        return false;
+      }
+      return ::input::passthrough_next_message(input);
     }
 
     void set_keyboard_sink(std::function<void(const keyboard_event_t &)> sink) {
@@ -2509,6 +2636,10 @@ namespace input {
 
       std::lock_guard lock {input->input_queue_lock};
       return input->input_queue.size();
+    }
+
+    crypto::PERM input_permissions(const std::shared_ptr<input_t> &input) {
+      return get_permissions(input);
     }
   }  // namespace testing
 #endif
