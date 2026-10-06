@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   plugins: [vue()],
+  publicDir: 'src_assets/common/assets/web/public',
   resolve: {
     alias: {
       vue: 'vue/dist/vue.esm-bundler.js',
