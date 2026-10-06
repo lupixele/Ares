@@ -304,6 +304,19 @@ describe('AresSidebar Component', () => {
     })
   })
 
+  it('restores pre-existing scroll and inert state after unmount', async () => {
+    document.body.style.overflow = 'auto'
+    document.getElementById('content').setAttribute('inert', '')
+    const router = createTestRouter('/')
+    await router.isReady()
+    const wrapper = mount(AresSidebar, { attachTo: document.body, global: globalOptions(router) })
+    wrapper.unmount()
+    expect(document.body.style.overflow).toBe('auto')
+    expect(document.getElementById('content').hasAttribute('inert')).toBe(true)
+    document.body.style.overflow = ''
+    document.getElementById('content').removeAttribute('inert')
+  })
+
   describe('Navbar wrapper', () => {
     it('mounts Navbar and renders adapted AresSidebar and Notification', async () => {
       const router = createTestRouter('/')

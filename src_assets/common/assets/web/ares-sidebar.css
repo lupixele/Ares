@@ -67,9 +67,7 @@
   display: flex;
   flex-direction: column;
   overflow: visible;
-  transition: width var(--ares-sidebar-transition),
-              transform var(--ares-sidebar-transition);
-  will-change: width;
+  transition: transform var(--ares-sidebar-transition);
 }
 
 .ares-sidebar--collapsed {
@@ -106,7 +104,7 @@
 .ares-sidebar__brand-name {
   white-space: nowrap;
   overflow: hidden;
-  transition: opacity var(--ares-sidebar-transition), max-width var(--ares-sidebar-transition);
+  transition: opacity var(--ares-sidebar-transition);
   max-width: 140px;
   opacity: 1;
 }
@@ -412,12 +410,15 @@
   .ares-sidebar__mobile-trigger {
     display: flex;
   }
+  .ares-sidebar__mobile-trigger--open {
+    left: calc(var(--ares-sidebar-width) - 54px);
+  }
 }
 
 /* ── Globally Scoped Shell Content Offset (Authenticated pages only) ── */
 body.has-ares-sidebar #content {
   margin-left: 220px;
-  transition: margin-left 220ms cubic-bezier(0.4, 0, 0.2, 1);
+  width: calc(100% - var(--ares-sidebar-width));
   min-height: 100vh;
   padding-top: 1.5rem;
   padding-bottom: 2rem;
@@ -425,11 +426,13 @@ body.has-ares-sidebar #content {
 
 html:not(.ares-sidebar-expanded) body.has-ares-sidebar #content {
   margin-left: 56px;
+  width: calc(100% - var(--ares-sidebar-rail));
 }
 
 @media (max-width: 768px) {
   body.has-ares-sidebar #content {
     margin-left: 0 !important;
+    width: 100%;
     padding-top: 56px;
     padding-left: 1rem;
     padding-right: 1rem;

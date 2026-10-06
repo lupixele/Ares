@@ -2,7 +2,7 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 
-const PORT = 48124
+const PORT = Number(process.env.PORT ?? 48124)
 const STATIC_DIR = path.resolve(__dirname, '../../build/assets/web')
 
 const MIME_TYPES = {
@@ -18,8 +18,16 @@ const MIME_TYPES = {
 
 const server = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0]
+  if (req.method !== 'GET') {
+    res.writeHead(405, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ status: false, error: 'Read-only UI fixture' }))
+  }
 
   // Mock API endpoints
+  if (urlPath === '/api/configLocale') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ locale: 'en' }))
+  }
   if (urlPath === '/api/config' || urlPath === '/./api/config') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify({
@@ -66,8 +74,8 @@ const server = http.createServer((req, res) => {
 
   // Handle any other api route
   if (urlPath.startsWith('/api/') || urlPath.startsWith('/./api/')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    return res.end('{}')
+    res.writeHead(501, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ status: false, error: `Unhandled fixture route: ${urlPath}` }))
   }
 
   // Static file resolution
@@ -75,8 +83,16 @@ const server = http.createServer((req, res) => {
   if (cleanUrl.startsWith('/public/')) {
     cleanUrl = cleanUrl.slice('/public'.length)
   }
-  let filePath = path.join(STATIC_DIR, cleanUrl === '/' ? 'index.html' : cleanUrl)
+  let filePath = path.resolve(STATIC_DIR, cleanUrl === '/' ? 'index.html' : `.${cleanUrl}`)
+  if (!filePath.startsWith(`${STATIC_DIR}${path.sep}`)) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' })
+    return res.end('Invalid fixture path')
+  }
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    if (path.extname(cleanUrl)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' })
+      return res.end('Missing fixture asset')
+    }
     filePath = path.join(STATIC_DIR, 'index.html')
   }
 
@@ -94,5 +110,5 @@ const server = http.createServer((req, res) => {
 })
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Preview server listening on http://127.0.0.1:${PORT}`)
+  console.log(`Preview server listening on http://127.0.0.1:${server.address().port}`)
 })

@@ -100,6 +100,7 @@
   <!-- Mobile hamburger trigger (fixed, outside sidebar) -->
   <button
     class="ares-sidebar__mobile-trigger"
+    :class="{ 'ares-sidebar__mobile-trigger--open': mobileOpen }"
     @click="mobileOpen = !mobileOpen"
     :aria-label="$t('navbar.toggle_menu')"
     :aria-expanded="mobileOpen"
@@ -133,6 +134,7 @@ import {
 } from '@lucide/vue'
 import ThemeToggle from './ThemeToggle.vue'
 import Notification from './Notification.vue'
+import { logoutWithBasicAuth } from './logout.js'
 
 const logoSrc = '/images/logo-apollo-45.png'
 
@@ -189,6 +191,8 @@ const mobileOpen = ref(false)
 const isMobile = ref(false)
 const sidebarEl = ref(null)
 let _lastFocusBeforeOpen = null
+let originalBodyOverflow = ''
+let originalContentInert = false
 
 // ── Navigation items ──
 const navItems = [
@@ -246,7 +250,7 @@ function getVisibleFocusable(container) {
 }
 
 function onKeyDown(e) {
-  if (e.key === 'Escape' && mobileOpen.value) {
+  if (e.key === 'Escape') {
     const openDropdown = sidebarEl.value?.querySelector('.dropdown-menu.show')
     if (openDropdown) {
       openDropdown.classList.remove('show')
@@ -272,7 +276,7 @@ function onKeyDown(e) {
         e.preventDefault()
         last.focus()
       }
-    } else {
+    } else if (mobileOpen.value) {
       if (document.activeElement === last || !sidebarEl.value.contains(document.activeElement)) {
         e.preventDefault()
         first.focus()
@@ -287,6 +291,8 @@ watch(mobileOpen, (open) => {
 
   if (open) {
     _lastFocusBeforeOpen = document.activeElement
+    originalBodyOverflow = document.body.style.overflow
+    originalContentInert = contentEl?.hasAttribute('inert') ?? false
     document.body.classList.add('ares-sidebar-scroll-locked')
     document.body.style.overflow = 'hidden'
     if (contentEl) {
@@ -302,9 +308,9 @@ watch(mobileOpen, (open) => {
     }
   } else {
     document.body.classList.remove('ares-sidebar-scroll-locked')
-    document.body.style.overflow = ''
+    document.body.style.overflow = originalBodyOverflow
     if (contentEl) {
-      contentEl.removeAttribute('inert')
+      contentEl.toggleAttribute('inert', originalContentInert)
     }
     if (_lastFocusBeforeOpen && typeof _lastFocusBeforeOpen.focus === 'function') {
       _lastFocusBeforeOpen.focus()
@@ -322,24 +328,7 @@ if (route) {
 
 // ── BasicAuth Logout ──
 function logout() {
-  const cacheBuster = Date.now().toString()
-  const logoutPageUrl = new URL('/logout', (typeof window !== 'undefined' ? window.location.href : 'http://localhost/'))
-  const request = new XMLHttpRequest()
-  const finish = () => {
-    if (router && typeof router.push === 'function') {
-      router.push('/logout')
-    } else if (typeof window !== 'undefined') {
-      window.location.replace(logoutPageUrl.toString())
-    }
-  }
-
-  request.open('GET', '/', true, 'sunshine-logout', cacheBuster)
-  request.setRequestHeader('Cache-Control', 'no-store')
-  request.onload = finish
-  request.onerror = finish
-  request.ontimeout = finish
-  request.timeout = 5000
-  request.send()
+  logoutWithBasicAuth()
 }
 
 // ── Lifecycle ──
@@ -350,6 +339,8 @@ onMounted(() => {
     document.addEventListener('keydown', onKeyDown)
   }
   if (typeof document !== 'undefined') {
+    originalBodyOverflow = document.body.style.overflow
+    originalContentInert = document.getElementById('content')?.hasAttribute('inert') ?? false
     document.body.classList.add('has-ares-sidebar')
     document.documentElement.classList.add('has-ares-sidebar')
     document.documentElement.classList.toggle('ares-sidebar-expanded', !collapsed.value)
@@ -364,12 +355,12 @@ onBeforeUnmount(() => {
   if (typeof document !== 'undefined') {
     document.body.classList.remove('has-ares-sidebar')
     document.body.classList.remove('ares-sidebar-scroll-locked')
-    document.body.style.overflow = ''
+    document.body.style.overflow = originalBodyOverflow
     document.documentElement.classList.remove('has-ares-sidebar')
     document.documentElement.classList.remove('ares-sidebar-expanded')
     const contentEl = document.getElementById('content')
     if (contentEl) {
-      contentEl.removeAttribute('inert')
+      contentEl.toggleAttribute('inert', originalContentInert)
     }
   }
 })

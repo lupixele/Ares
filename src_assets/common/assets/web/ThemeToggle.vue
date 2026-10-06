@@ -35,17 +35,17 @@ onMounted(() => {
 
 <template>
   <div class="dropdown bd-mode-toggle">
-    <a class="nav-link dropdown-toggle d-flex align-items-center"
+    <button class="nav-link dropdown-toggle d-flex align-items-center"
             id="bd-theme"
             type="button"
             aria-expanded="false"
             data-bs-toggle="dropdown"
-            aria-label="{{ $t('navbar.toggle_theme') }} ({{ $t('navbar.theme_auto') }})">
+             :aria-label="`${$t('navbar.toggle_theme')} (${$t('navbar.theme_auto')})`">
       <span class="theme-icon-active">
         <MonitorSmartphone :size="18" class="icon"></MonitorSmartphone>
       </span>
       <span id="bd-theme-text">{{ $t('navbar.toggle_theme') }}</span>
-    </a>
+    </button>
     <ul class="dropdown-menu dropdown-menu-end theme-menu" aria-labelledby="bd-theme-text">
       <li class="theme-menu-full">
         <button type="button" class="dropdown-item d-flex align-items-center active" data-bs-theme-value="auto" aria-pressed="true">
