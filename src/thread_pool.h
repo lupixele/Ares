@@ -5,6 +5,10 @@
 #pragma once
 
 // standard includes
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <optional>
 #include <thread>
 
 // local includes
@@ -23,16 +27,21 @@ namespace thread_pool_util {
     typedef TaskPool::__task __task;
 
   private:
-    std::vector<std::jthread> _thread;
+    static inline thread_local const ThreadPool *_current_worker_pool {nullptr};  ///< Active thread pool instance executing on the calling thread.
 
-    std::condition_variable _cv;
-    std::mutex _lock;
+    std::mutex _lifecycle_lock;  ///< Synchronizes worker thread startup and thread list lifecycle operations.
+    std::vector<std::jthread> _thread;  ///< Worker threads owned by the pool.
 
-    bool _continue;
+    std::condition_variable _cv;  ///< Coordinates work availability and quiescence.
+    std::mutex _lock;  ///< Synchronizes task queue operations and lifecycle state.
+
+    std::atomic<bool> _continue {false};  ///< Flag indicating whether worker threads should continue running.
+    std::size_t _active_workers {0};  ///< Number of currently active worker threads. Guarded by _lock.
 
   public:
     ThreadPool():
-        _continue {false} {
+        _continue {false},
+        _active_workers {0} {
     }
 
     /**
@@ -41,18 +50,12 @@ namespace thread_pool_util {
      * @param threads Number of worker threads to start.
      */
     explicit ThreadPool(int threads):
-        _thread(threads),
-        _continue {true} {
-      for (auto &t : _thread) {
-        t = std::jthread(&ThreadPool::_main, this);
-      }
+        _continue {false},
+        _active_workers {0} {
+      start(threads);
     }
 
     ~ThreadPool() noexcept {
-      if (!_continue) {
-        return;
-      }
-
       stop();
       join();
     }
@@ -67,6 +70,28 @@ namespace thread_pool_util {
     template<class Function, class... Args>
     auto push(Function &&newTask, Args &&...args) {
       std::lock_guard lg(_lock);
+      auto future = TaskPool::push(std::forward<Function>(newTask), std::forward<Args>(args)...);
+
+      _cv.notify_one();
+      return future;
+    }
+
+    /**
+     * @brief Queue work for asynchronous execution only if the thread pool is currently running.
+     *
+     * Checks _continue under the same lock as stop before enqueuing.
+     *
+     * @param newTask New task.
+     * @param args Arguments forwarded to the callable or parser.
+     * @return Optional future of the queued task, or std::nullopt if the pool is stopping or stopped.
+     */
+    template<class Function, class... Args>
+    auto push_if_running(Function &&newTask, Args &&...args)
+      -> std::optional<decltype(TaskPool::push(std::forward<Function>(newTask), std::forward<Args>(args)...))> {
+      std::lock_guard lg(_lock);
+      if (!_continue.load(std::memory_order_relaxed)) {
+        return std::nullopt;
+      }
       auto future = TaskPool::push(std::forward<Function>(newTask), std::forward<Args>(args)...);
 
       _cv.notify_one();
@@ -108,12 +133,50 @@ namespace thread_pool_util {
      * @param threads Number of worker threads to start.
      */
     void start(int threads) {
-      _continue = true;
+      if (threads <= 0) {
+        return;
+      }
 
-      _thread.resize(threads);
+      std::lock_guard lifecycle_guard(_lifecycle_lock);
+
+      if (_continue.load(std::memory_order_acquire)) {
+        return;
+      }
 
       for (auto &t : _thread) {
-        t = std::jthread(&ThreadPool::_main, this);
+        if (t.joinable()) {
+          t.join();
+        }
+      }
+      _thread.clear();
+
+      {
+        std::lock_guard lg(_lock);
+        _continue.store(true, std::memory_order_release);
+        _active_workers += static_cast<std::size_t>(threads);
+      }
+
+      std::size_t spawned = 0;
+      try {
+        _thread.reserve(static_cast<std::size_t>(threads));
+        for (int i = 0; i < threads; ++i) {
+          _thread.emplace_back(&ThreadPool::_main, this);
+          ++spawned;
+        }
+      } catch (...) {
+        {
+          std::lock_guard lg(_lock);
+          _continue.store(false, std::memory_order_release);
+          _active_workers -= (static_cast<std::size_t>(threads) - spawned);
+        }
+        _cv.notify_all();
+        for (auto &t : _thread) {
+          if (t.joinable()) {
+            t.join();
+          }
+        }
+        _thread.clear();
+        throw;
       }
     }
 
@@ -121,9 +184,10 @@ namespace thread_pool_util {
      * @brief Stop worker threads and prevent additional task execution.
      */
     void stop() {
-      std::lock_guard lg(_lock);
-
-      _continue = false;
+      {
+        std::lock_guard lg(_lock);
+        _continue.store(false, std::memory_order_release);
+      }
       _cv.notify_all();
     }
 
@@ -131,9 +195,52 @@ namespace thread_pool_util {
      * @brief Wait for worker threads owned by the session to exit.
      */
     void join() {
+      std::lock_guard lifecycle_guard(_lifecycle_lock);
       for (auto &t : _thread) {
-        t.join();
+        if (t.joinable()) {
+          t.join();
+        }
       }
+      _thread.clear();
+    }
+
+    /**
+     * @brief Wait until all worker threads have completed task execution and quiesced.
+     *
+     * Must only be called from an external thread (asserts calling thread is not a worker).
+     * Does not join worker threads.
+     */
+    void wait_for_quiescence() {
+      assert(!is_worker_thread());
+      std::unique_lock lg(_lock);
+      _cv.wait(lg, [this]() {
+        return _active_workers == 0;
+      });
+    }
+
+    /**
+     * @brief Wait with a timeout until all worker threads have completed task execution and quiesced.
+     *
+     * @param timeout Maximum duration to wait for worker quiescence.
+     * @return True if all workers quiesced within the timeout, false otherwise.
+     */
+    template<class Rep, class Period>
+    bool wait_for_quiescence(const std::chrono::duration<Rep, Period> &timeout) {
+      assert(!is_worker_thread());
+      std::unique_lock lg(_lock);
+      return _cv.wait_for(lg, timeout, [this]() {
+        return _active_workers == 0;
+      });
+    }
+
+    /**
+     * @brief Return the number of currently active worker threads.
+     *
+     * @return Number of active worker threads.
+     */
+    [[nodiscard]] std::size_t active_workers() const noexcept {
+      std::lock_guard lg(const_cast<std::mutex &>(_lock));
+      return _active_workers;
     }
 
     /**
@@ -141,9 +248,17 @@ namespace thread_pool_util {
      *
      * @return True while the thread pool is running.
      */
-    bool running() {
-      std::lock_guard lg(_lock);
-      return _continue;
+    [[nodiscard]] bool running() const noexcept {
+      return _continue.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Check whether the current calling thread is a worker thread of this pool.
+     *
+     * @return True if the calling thread is executing as a worker thread belonging to this pool.
+     */
+    [[nodiscard]] bool is_worker_thread() const noexcept {
+      return _current_worker_pool == this;
     }
 
   public:
@@ -151,8 +266,32 @@ namespace thread_pool_util {
      * @brief Run the main application or worker loop.
      */
     void _main() {
+      struct WorkerScope {
+        const ThreadPool *prev;  ///< Previously active thread pool pointer.
+        explicit WorkerScope(const ThreadPool *pool) noexcept:
+            prev {_current_worker_pool} {
+          _current_worker_pool = pool;
+        }
+        ~WorkerScope() noexcept {
+          _current_worker_pool = prev;
+        }
+      } scope(this);
+
+      struct WorkerExitGuard {
+        ThreadPool *pool;  ///< Owning thread pool instance.
+        ~WorkerExitGuard() noexcept {
+          std::lock_guard lg(pool->_lock);
+          if (pool->_active_workers > 0) {
+            --pool->_active_workers;
+          }
+          if (pool->_active_workers == 0) {
+            pool->_cv.notify_all();
+          }
+        }
+      } exit_guard {this};
+
       platf::set_thread_name("TaskPool::worker");
-      while (_continue) {
+      while (_continue.load(std::memory_order_relaxed)) {
         if (auto task = this->pop()) {
           (*task)->run();
         } else {
@@ -162,7 +301,7 @@ namespace thread_pool_util {
             continue;
           }
 
-          if (!_continue) {
+          if (!_continue.load(std::memory_order_relaxed)) {
             break;
           }
 

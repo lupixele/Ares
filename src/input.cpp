@@ -940,10 +940,22 @@ namespace input {
      * when the last mouse coordinates were absolute
      */
     if (button == BUTTON_LEFT && release && !input->mouse_left_button_timeout) {
-      auto f = [=]() {
+      auto f = [weak_input = std::weak_ptr<input_t>(input), release]() {
+        auto input = weak_input.lock();
+        if (!input) {
+          return;
+        }
+        {
+          std::lock_guard lock {input->input_queue_lock};
+          if (input->stopped) {
+            input->mouse_left_button_timeout = nullptr;
+            return;
+          }
+        }
         auto left_released = mouse_press[BUTTON_LEFT];
         if (left_released) {
           // Already released left button
+          input->mouse_left_button_timeout = nullptr;
           return;
         }
         platf::button_mouse(platf_input, BUTTON_LEFT, release);
@@ -1162,11 +1174,26 @@ namespace input {
   /**
    * @brief Re-emit a held key until its repeat task is cancelled.
    *
+   * @param weak_input Weak reference to the stream input context owning the key repeat.
    * @param key_code Moonlight keyboard packet key code.
    * @param flags Bit flags that modify the requested operation.
    * @param synthetic_modifiers Synthetic modifiers.
    */
-  void repeat_key(uint16_t key_code, uint8_t flags, uint8_t synthetic_modifiers) {
+  void repeat_key(std::weak_ptr<input_t> weak_input, uint16_t key_code, uint8_t flags, uint8_t synthetic_modifiers) {
+    auto input = weak_input.lock();
+    if (!input) {
+      key_press_repeat_id = nullptr;
+      return;
+    }
+
+    {
+      std::lock_guard lock {input->input_queue_lock};
+      if (input->stopped) {
+        key_press_repeat_id = nullptr;
+        return;
+      }
+    }
+
     // If key no longer pressed, stop repeating
     const auto state = key_press[make_kpid(key_code, flags)];
     if (!state.pressed) {
@@ -1176,7 +1203,14 @@ namespace input {
 
     send_key_and_modifiers(key_code, false, flags, synthetic_modifiers, state.extended);
 
-    key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers).task_id;
+    {
+      std::lock_guard lock {input->input_queue_lock};
+      if (input->stopped) {
+        key_press_repeat_id = nullptr;
+        return;
+      }
+      key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, weak_input, key_code, flags, synthetic_modifiers).task_id;
+    }
   }
 
   /**
@@ -1229,10 +1263,11 @@ namespace input {
 
         if (key_press_repeat_id) {
           task_pool.cancel(key_press_repeat_id);
+          key_press_repeat_id = nullptr;
         }
 
         if (config::input.key_repeat_delay.count() > 0) {
-          key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, keyCode, packet->flags, synthetic_modifiers).task_id;
+          key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, std::weak_ptr<input_t>(input), keyCode, packet->flags, synthetic_modifiers).task_id;
         }
       } else {
         // Already released
@@ -2190,9 +2225,19 @@ namespace input {
   }
 
   void passthrough_queued_messages(std::shared_ptr<input_t> input) {
+    if (!input) {
+      return;
+    }
     // Bound each turn so other task-pool work can run during sustained input.
     constexpr std::size_t packets_per_task = 32;
     for (std::size_t processed = 0; processed < packets_per_task; ++processed) {
+      {
+        std::lock_guard lock {input->input_queue_lock};
+        if (input->stopped) {
+          input->input_task_scheduled = false;
+          return;
+        }
+      }
       if (!passthrough_next_message(input)) {
         return;
       }
@@ -2203,7 +2248,7 @@ namespace input {
     bool has_more;
     {
       std::lock_guard lock {input->input_queue_lock};
-      has_more = !input->input_queue.empty();
+      has_more = !input->stopped && !input->input_queue.empty();
       if (!has_more) {
         input->input_task_scheduled = false;
       }
@@ -2417,16 +2462,16 @@ namespace input {
   }
 
   /**
-   * @brief Reset the object to its initial empty state.
+   * @brief Reset stream input state after a client disconnect or shutdown.
+   *
+   * @param input Retained stream input state to reset.
    */
   void reset(std::shared_ptr<input_t> &input) {
     if (!input) {
       return;
     }
-    task_pool.cancel(key_press_repeat_id);
-    task_pool.cancel(input->mouse_left_button_timeout);
 
-    // Drain queued input packets immediately so unhandled presses are discarded before stop
+    // Drain queued input packets immediately under lock so unhandled presses are discarded before stop
     {
       std::lock_guard lock {input->input_queue_lock};
       input->stopped = true;
@@ -2434,14 +2479,50 @@ namespace input {
       input->input_task_scheduled = false;
     }
 
-    // Quiesce serial input worker and reset all pressed input states
-    if (task_pool.running()) {
-      auto fut = task_pool.push([input]() {
-        reset_input_state(input);
-      });
-      fut.wait();
-    } else {
+    // Serialize cancel of delayed timer callbacks and release of input state inside the worker closure.
+    // This guarantees that any active in-flight input processing on the serial worker finishes before
+    // cleanup, avoiding race conditions where a queued keydown reschedules key repeat after cancellation.
+    auto reset_action = [input]() {
+      if (key_press_repeat_id) {
+        task_pool.cancel(key_press_repeat_id);
+        key_press_repeat_id = nullptr;
+      }
+      if (input->mouse_left_button_timeout && input->mouse_left_button_timeout != DISABLE_LEFT_BUTTON_DELAY) {
+        task_pool.cancel(input->mouse_left_button_timeout);
+        input->mouse_left_button_timeout = nullptr;
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
+        mouse_press[BUTTON_LEFT] = false;
+      } else if (input->mouse_left_button_timeout == DISABLE_LEFT_BUTTON_DELAY) {
+        input->mouse_left_button_timeout = nullptr;
+      }
       reset_input_state(input);
+    };
+
+    if (task_pool.is_worker_thread()) {
+      // Reentrant reset from within a task running on the worker pool.
+      // Must execute inline to avoid deadlocking on the single worker thread.
+      reset_action();
+    } else {
+      // External caller handoff to worker pool.
+      auto reset_future = task_pool.push_if_running(reset_action);
+      if (reset_future) {
+        try {
+          reset_future->get();
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "Input reset task failed on worker pool: "sv << e.what();
+        } catch (...) {
+          BOOST_LOG(warning) << "Input reset task failed on worker pool with unknown error"sv;
+        }
+      } else {
+        // Pool is stopped or stopping. Wait for real worker quiescence before executing inline
+        // to prevent concurrent mutation of global input state while workers drain.
+        task_pool.wait_for_quiescence();
+        // Concurrent external teardowns still share host-global key/button state.
+        // Pool startup must remain externally serialized with input shutdown.
+        static std::mutex stopped_pool_reset_mutex;
+        std::lock_guard reset_lock {stopped_pool_reset_mutex};
+        reset_action();
+      }
     }
   }
 
@@ -2573,7 +2654,17 @@ namespace input {
     }
 
     // Workaround to ensure new frames will be captured when a client connects
-    task_pool.pushDelayed([]() {
+    task_pool.pushDelayed([weak_input = std::weak_ptr<input_t>(input)]() {
+      const auto owner = weak_input.lock();
+      if (!owner) {
+        return;
+      }
+      {
+        std::lock_guard lock {owner->input_queue_lock};
+        if (owner->stopped) {
+          return;
+        }
+      }
       platf::move_mouse(platf_input, 1, 1);
       platf::move_mouse(platf_input, -1, -1);
     },

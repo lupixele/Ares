@@ -2288,9 +2288,66 @@ namespace stream {
     }
 
     /**
+     * @brief Abandon an unstarted session and release pre-start resources.
+     *
+     * @param session Streaming session to abandon.
+     */
+    void abandon(session_t &session) {
+      session.shutdown_event->raise(true);
+      session.state.store(state_e::STOPPED, std::memory_order_release);
+      if (session.audioThread.joinable()) {
+        session.audioThread.join();
+      }
+      if (session.videoThread.joinable()) {
+        session.videoThread.join();
+      }
+      if (session.broadcast_ref) {
+        {
+          auto lg = session.broadcast_ref->control_server._sessions.lock();
+          auto &sessions = *session.broadcast_ref->control_server._sessions;
+          auto it = std::find(sessions.begin(), sessions.end(), &session);
+          if (it != sessions.end()) {
+            sessions.erase(it);
+          }
+        }
+        session.broadcast_ref.release();
+      }
+      if (session.input) {
+        input::reset(session.input);
+        session.input.reset();
+      }
+    }
+
+    /**
      * @brief Start the audio, video, and control workers for a streaming session.
      */
     int start(session_t &session, const std::string &addr_string) {
+      session.state.store(state_e::STARTING, std::memory_order_release);
+
+      auto fg = util::fail_guard([&session]() {
+        session.shutdown_event->raise(true);
+        session.state.store(state_e::STOPPED, std::memory_order_release);
+        // A later worker spawn may throw after the first has started. Stop and
+        // join that worker before unregistering its shared broadcast context.
+        if (session.audioThread.joinable()) {
+          session.audioThread.join();
+        }
+        if (session.videoThread.joinable()) {
+          session.videoThread.join();
+        }
+        if (session.broadcast_ref) {
+          {
+            auto lg = session.broadcast_ref->control_server._sessions.lock();
+            auto &sessions = *session.broadcast_ref->control_server._sessions;
+            auto it = std::find(sessions.begin(), sessions.end(), &session);
+            if (it != sessions.end()) {
+              sessions.erase(it);
+            }
+          }
+          session.broadcast_ref.release();
+        }
+      });
+
       if (!session.input) {
         session.input = input::alloc(session.mail, session.input_session_id, session.permissions);
         if (!session.input) {
@@ -2325,7 +2382,8 @@ namespace stream {
       session.audioThread = std::jthread {audioThread, &session};
       session.videoThread = std::jthread {videoThread, &session};
 
-      session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+      session.state.store(state_e::RUNNING, std::memory_order_release);
+      fg.disable();
 
       // If this is the first session, invoke the platform callbacks
       if (++running_sessions == 1) {

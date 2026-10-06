@@ -2,6 +2,20 @@
 
 ## Overview
 
+### Reset execution contract
+
+Production input work uses a single-worker task pool. Reset marks a context stopped
+and drains queued packets, then performs timer cancellation and held-input cleanup
+on that same executor. Worker-thread resets execute inline; external resets use
+an accepted-work handoff and wait for completion. If the pool is stopping, reset
+waits for worker quiescence and serializes external cleanup of host-global state.
+There is no timeout-then-inline fallback. Cleanup depends on bounded backend
+operations and is not a hard wall-clock deadline. Pool startup must not race input
+shutdown, and this contract does not provide multi-worker input serialization.
+Keyboard and mouse bookkeeping remains host-global, so cleanup is not isolated
+per paired client. Tests use fake virtual HID backends and a real single worker;
+they do not constitute real-device acceptance or coverage-percentage evidence.
+
 This slice wires authenticated streaming-session permissions and certificate-derived identity retention:
 - `nvhttp::make_launch_session` sets the session permission snapshot directly from the authenticated `client_principal_t` (TLS peer certificate matched against server pairing registry).
 - `rtsp_stream::launch_session_t` stores the permission bitmask (defaulting backwards-compatibly to `crypto::PERM::_all`).

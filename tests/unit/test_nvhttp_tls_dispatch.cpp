@@ -16,9 +16,12 @@
 #include <thread>
 
 #include <src/config.h>
+#include <src/input.h>
 #include <src/nvhttp.h>
+#include <src/platform/virtualhid_input.h>
 #include <src/process.h>
 #include <src/rtsp.h>
+#include <src/stream.h>
 
 namespace {
   /** @brief Blocking TLS client used only with the isolated loopback test server. */
@@ -920,4 +923,640 @@ TEST_F(TLSDispatchTest, RtspAdmissionRevalidationProtectsPendingLaunchAgainstSta
     session.perm = client_rec.perm;
   }
   EXPECT_EQ(session.perm, view_mouse);
+}
+
+/**
+ * @brief Concurrency barrier and lifecycle test fixture for RTSP stream admission.
+ */
+class RtspAdmissionBarrierTest : public TLSDispatchTest {
+protected:
+  /**
+   * @brief Configure isolated client state, fake input backend, and injected lifecycle hooks.
+   */
+  void SetUp() override {
+    TLSDispatchTest::SetUp();
+
+    original_input_config_ = config::input;
+    config::input.keyboard = true;
+    config::input.mouse = true;
+    config::input.controller = true;
+    config::input.keybindings.clear();
+    config::input.key_rightalt_to_key_win = false;
+    config::input.key_repeat_delay = std::chrono::milliseconds {0};
+
+    auto platform_input = platf::input();
+    if (platform_input) {
+      auto &context = platf::virtualhid::get_input_context(platform_input);
+      context = platf::virtualhid::input_context_t {lvh::BackendKind::fake};
+      input::testing::set_platform_input(std::move(platform_input));
+    }
+    input::testing::reset_keyboard_state();
+    input::testing::set_input_task_sink([](std::shared_ptr<input::input_t>) {});
+
+    rtsp_stream::test_support::reset_test_hooks();
+    rtsp_stream::test_support::clear_all();
+
+    start_calls_.store(0);
+    stop_calls_.store(0);
+    join_calls_.store(0);
+
+    rtsp_stream::test_support::set_start_session_hook([this](stream::session_t &, const std::string &) {
+      ++start_calls_;
+      return 0;
+    });
+    rtsp_stream::test_support::set_stop_session_hook([this](stream::session_t &) {
+      ++stop_calls_;
+    });
+    rtsp_stream::test_support::set_join_session_hook([this](stream::session_t &) {
+      ++join_calls_;
+    });
+  }
+
+  /**
+   * @brief Clean up injected test hooks and restored configuration.
+   */
+  void TearDown() override {
+    rtsp_stream::test_support::stop_test_server();
+    rtsp_stream::test_support::clear_all();
+    rtsp_stream::test_support::reset_test_hooks();
+
+    input::testing::reset_keyboard_state();
+    input::terminate_gamepads();
+    input::testing::set_input_task_sink(nullptr);
+    input::testing::set_platform_input({});
+    config::input = std::move(original_input_config_);
+
+    TLSDispatchTest::TearDown();
+  }
+
+  config::input_t original_input_config_;  ///< Original input configuration.
+  std::atomic<int> start_calls_ {0};  ///< Invocation count of fake start hook.
+  std::atomic<int> stop_calls_ {0};  ///< Invocation count of fake stop hook.
+  std::atomic<int> join_calls_ {0};  ///< Invocation count of fake join hook.
+};
+
+/**
+ * @brief Race condition barrier test:
+ *        When admin revokes client A during an in-flight admission paused after registry check,
+ *        the admin clear blocks until admission commits, and then immediately stops/joins the new session,
+ *        guaranteeing zero active sessions when admin termination returns.
+ */
+TEST_F(RtspAdmissionBarrierTest, AdminRevocationSerializesWithInFlightAdmissionZeroOrphanSessions) {
+  const auto creds_a = test_utils::certificates::generate_ca_credentials("Admission Client A");
+  const auto uuid_a = nvhttp::test_support::add_client(
+    "ClientA",
+    creds_a.x509,
+    true,
+    crypto::PERM::view | crypto::PERM::input_controller
+  );
+  ASSERT_FALSE(uuid_a.empty());
+
+  rtsp_stream::launch_session_t launch_a {};
+  launch_a.id = 301;
+  launch_a.client_cert = creds_a.x509;
+  launch_a.perm = crypto::PERM::view | crypto::PERM::input_controller;
+  launch_a.unique_id = "test-unique-301";
+  launch_a.iv.resize(16);
+
+  stream::config_t stream_config {};
+
+  std::promise<void> admit_holding_lane_barrier;
+  std::promise<void> admin_clear_called_barrier;
+  std::promise<void> release_alloc_barrier;
+  auto release_future = release_alloc_barrier.get_future().share();
+
+  rtsp_stream::test_support::set_pause_before_alloc_hook([&](const rtsp_stream::launch_session_t &) {
+    admit_holding_lane_barrier.set_value();
+    const auto wait_status = release_future.wait_for(std::chrono::seconds(5));
+    if (wait_status != std::future_status::ready) {
+      throw std::runtime_error("Pause before alloc barrier timed out waiting for release");
+    }
+  });
+
+  rtsp_stream::test_support::set_terminate_sessions_hook([&](std::string_view cert) {
+    if (cert == creds_a.x509) {
+      try {
+        admin_clear_called_barrier.set_value();
+      } catch (const std::future_error &) {
+      }
+    }
+  });
+
+  auto unblock_guard = util::fail_guard([&release_alloc_barrier]() {
+    try {
+      release_alloc_barrier.set_value();
+    } catch (...) {
+    }
+  });
+
+  std::atomic<int> admit_result {-1};
+  std::jthread admission_thread([&]() {
+    admit_result.store(rtsp_stream::test_support::admit(stream_config, launch_a, "127.0.0.1"));
+  });
+
+  auto lane_acquired_future = admit_holding_lane_barrier.get_future();
+  ASSERT_EQ(lane_acquired_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  std::atomic<bool> admin_returned {false};
+  std::jthread admin_thread([&]() {
+    const bool updated = nvhttp::update_client(uuid_a, false, std::nullopt);
+    EXPECT_TRUE(updated);
+    rtsp_stream::terminate_sessions_by_cert(creds_a.x509);
+    admin_returned.store(true);
+  });
+
+  auto admin_entered_future = admin_clear_called_barrier.get_future();
+  ASSERT_EQ(admin_entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+  // Admin clear must be blocked while admission holds the lifecycle lane lock
+  EXPECT_FALSE(admin_returned.load());
+
+  // Release admission to finish alloc + commit
+  release_alloc_barrier.set_value();
+  unblock_guard.disable();
+
+  admission_thread.join();
+  EXPECT_EQ(admit_result.load(), 200);
+  EXPECT_EQ(start_calls_.load(), 1);
+
+  admin_thread.join();
+  EXPECT_TRUE(admin_returned.load());
+
+  // All old sessions for client A must be torn down and purged
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+  EXPECT_FALSE(rtsp_stream::test_support::has_session_for_cert(creds_a.x509));
+  EXPECT_EQ(stop_calls_.load(), 1);
+  EXPECT_EQ(join_calls_.load(), 1);
+}
+
+/**
+ * @brief When administrative revocation completes before admission attempts to acquire the lane lock,
+ *        admission must fail closed and reject with 403 Forbidden.
+ */
+TEST_F(RtspAdmissionBarrierTest, ClearCompleteBeforeAdmitRejectsRevokedClient) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Revoked Before Client");
+  const auto uuid = nvhttp::test_support::add_client("RevokedBefore", creds.x509, true, crypto::PERM::view);
+  ASSERT_FALSE(uuid.empty());
+
+  // Admin disables client and terminates all sessions before admission starts
+  ASSERT_TRUE(nvhttp::update_client(uuid, false, std::nullopt));
+  rtsp_stream::terminate_sessions_by_cert(creds.x509);
+
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 302;
+  launch.client_cert = creds.x509;
+  launch.perm = crypto::PERM::view;
+  launch.unique_id = "test-unique-302";
+  launch.iv.resize(16);
+
+  stream::config_t stream_config {};
+  const int status = rtsp_stream::test_support::admit(stream_config, launch, "127.0.0.1");
+  EXPECT_EQ(status, 403);
+  EXPECT_EQ(start_calls_.load(), 0);
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+  EXPECT_FALSE(rtsp_stream::test_support::has_session_for_cert(creds.x509));
+}
+
+/**
+ * @brief Permission reduced reconnect:
+ *        When an existing pairing's permissions are downgraded in the registry,
+ *        admission restricts the session permission snapshot to the fresh registry record,
+ *        discarding the stale initial launch session mask.
+ */
+TEST_F(RtspAdmissionBarrierTest, PermissionReducedReconnectRestrictsToFreshRegistrySnapshot) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Downgraded Client");
+  const auto full_perms = crypto::PERM::view | crypto::PERM::input_controller | crypto::PERM::input_mouse;
+  const auto uuid = nvhttp::test_support::add_client("DowngradedClient", creds.x509, true, full_perms);
+  ASSERT_FALSE(uuid.empty());
+
+  const auto reduced_perms = crypto::PERM::view | crypto::PERM::input_mouse;
+  ASSERT_TRUE(nvhttp::update_client(uuid, true, static_cast<uint32_t>(reduced_perms)));
+
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 303;
+  launch.client_cert = creds.x509;
+  launch.perm = full_perms;  // Stale initial snapshot
+  launch.unique_id = "test-unique-303";
+  launch.iv.resize(16);
+
+  stream::config_t stream_config {};
+  const int status = rtsp_stream::test_support::admit(stream_config, launch, "127.0.0.1");
+  EXPECT_EQ(status, 200);
+  EXPECT_EQ(launch.perm, reduced_perms);
+  EXPECT_FALSE(bool(launch.perm & crypto::PERM::input_controller));
+  EXPECT_TRUE(bool(launch.perm & crypto::PERM::input_mouse));
+  EXPECT_TRUE(bool(launch.perm & crypto::PERM::view));
+
+  EXPECT_EQ(start_calls_.load(), 1);
+  EXPECT_EQ(rtsp_stream::session_count(), 1);
+  EXPECT_TRUE(rtsp_stream::test_support::has_session_for_cert(creds.x509));
+}
+
+/**
+ * @brief Unknown client or missing certificate must fail closed with 403 Forbidden.
+ */
+TEST_F(RtspAdmissionBarrierTest, UnknownClientOrMissingCertificateFailsClosed) {
+  stream::config_t stream_config {};
+
+  // Case 1: Empty client cert
+  rtsp_stream::launch_session_t launch_empty {};
+  launch_empty.id = 304;
+  launch_empty.client_cert = "";
+  launch_empty.perm = crypto::PERM::view;
+  launch_empty.unique_id = "test-empty";
+  launch_empty.iv.resize(16);
+  EXPECT_EQ(rtsp_stream::test_support::admit(stream_config, launch_empty, "127.0.0.1"), 403);
+  EXPECT_EQ(start_calls_.load(), 0);
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+
+  // Case 2: Unknown client cert not in registry
+  const auto creds_unknown = test_utils::certificates::generate_ca_credentials("Unknown Client");
+  rtsp_stream::launch_session_t launch_unknown {};
+  launch_unknown.id = 305;
+  launch_unknown.client_cert = creds_unknown.x509;
+  launch_unknown.perm = crypto::PERM::view;
+  launch_unknown.unique_id = "test-unknown";
+  launch_unknown.iv.resize(16);
+  EXPECT_EQ(rtsp_stream::test_support::admit(stream_config, launch_unknown, "127.0.0.1"), 403);
+  EXPECT_EQ(start_calls_.load(), 0);
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+  EXPECT_FALSE(rtsp_stream::test_support::has_session_for_cert(creds_unknown.x509));
+}
+
+/**
+ * @brief Distinct certificate sessions remain completely unaffected when another client is terminated.
+ */
+TEST_F(RtspAdmissionBarrierTest, DistinctCertificateSessionRemainsUnaffected) {
+  const auto creds_a = test_utils::certificates::generate_ca_credentials("Client A Distinct");
+  const auto creds_b = test_utils::certificates::generate_ca_credentials("Client B Distinct");
+
+  const auto uuid_a = nvhttp::test_support::add_client("ClientA", creds_a.x509, true, crypto::PERM::view);
+  const auto uuid_b = nvhttp::test_support::add_client("ClientB", creds_b.x509, true, crypto::PERM::view);
+  ASSERT_FALSE(uuid_a.empty());
+  ASSERT_FALSE(uuid_b.empty());
+
+  stream::config_t stream_config {};
+
+  rtsp_stream::launch_session_t launch_b {};
+  launch_b.id = 306;
+  launch_b.client_cert = creds_b.x509;
+  launch_b.perm = crypto::PERM::view;
+  launch_b.unique_id = "test-306";
+  launch_b.iv.resize(16);
+
+  ASSERT_EQ(rtsp_stream::test_support::admit(stream_config, launch_b, "127.0.0.1"), 200);
+  EXPECT_EQ(start_calls_.load(), 1);
+  EXPECT_EQ(rtsp_stream::session_count(), 1);
+  EXPECT_TRUE(rtsp_stream::test_support::has_session_for_cert(creds_b.x509));
+
+  // Admin terminates Client A
+  rtsp_stream::terminate_sessions_by_cert(creds_a.x509);
+
+  // Client B remains active and unaffected
+  EXPECT_EQ(rtsp_stream::session_count(), 1);
+  EXPECT_TRUE(rtsp_stream::test_support::has_session_for_cert(creds_b.x509));
+  EXPECT_FALSE(rtsp_stream::test_support::has_session_for_cert(creds_a.x509));
+  EXPECT_EQ(stop_calls_.load(), 0);
+  EXPECT_EQ(join_calls_.load(), 0);
+}
+
+/**
+ * @brief Verify that test pause hooks enforce bounded timeout contracts and do not hang indefinitely.
+ */
+TEST_F(RtspAdmissionBarrierTest, InitialStagePauseHookBoundedTimeoutSafety) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Timeout Safety Client");
+  const auto uuid = nvhttp::test_support::add_client("TimeoutClient", creds.x509, true, crypto::PERM::view);
+  ASSERT_FALSE(uuid.empty());
+
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 307;
+  launch.client_cert = creds.x509;
+  launch.perm = crypto::PERM::view;
+  launch.unique_id = "test-307";
+  launch.iv.resize(16);
+
+  stream::config_t stream_config {};
+
+  std::promise<void> unfulfilled_barrier;
+  auto unfulfilled_future = unfulfilled_barrier.get_future().share();
+
+  rtsp_stream::test_support::set_pause_before_alloc_hook([&](const rtsp_stream::launch_session_t &) {
+    const auto status = unfulfilled_future.wait_for(std::chrono::milliseconds(100));
+    if (status != std::future_status::ready) {
+      throw std::runtime_error("Bounded wait expired as expected without blocking test runner");
+    }
+  });
+
+  EXPECT_THROW(
+    rtsp_stream::test_support::admit(stream_config, launch, "127.0.0.1"),
+    std::runtime_error
+  );
+
+  EXPECT_EQ(start_calls_.load(), 0);
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+}
+
+/**
+ * @brief Multi-TCP ticket snapshot reuse across accepts.
+ *
+ * @details Moonlight opens a new TCP connection per RTSP transaction (OPTIONS, DESCRIBE, SETUP, etc.)
+ *          per moonlight-common-c RtspConnection.c lines 387/407/515. The production handle_accept
+ *          flow uses a non-consuming snapshot (peek_pending) under the lifecycle lane so multiple
+ *          independent TCP sockets bind to the same pending launch session without popping the ticket
+ *          or cancelling the deadline on first accept.
+ */
+TEST_F(RtspAdmissionBarrierTest, MultiTcpTicketSnapshotReusedAcrossAccepts) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("MultiTCP Client");
+  nvhttp::test_support::add_client("MultiTcpClient", creds.x509, true, crypto::PERM::_all);
+
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 401;
+  launch->client_cert = creds.x509;
+  launch->perm = crypto::PERM::_all;
+  launch->unique_id = "test-multitcp-401";
+
+  rtsp_stream::launch_session_raise(launch);
+  ASSERT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+
+  // Simulate multiple successive TCP accepts (e.g. OPTIONS, then DESCRIBE, then SETUP)
+  auto accept_one = rtsp_stream::test_support::simulate_accept_snapshot();
+  ASSERT_NE(accept_one, nullptr);
+  EXPECT_EQ(accept_one->id, 401u);
+
+  // Ticket must still remain pending for subsequent RTSP negotiation sockets
+  EXPECT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+
+  auto accept_two = rtsp_stream::test_support::simulate_accept_snapshot();
+  ASSERT_NE(accept_two, nullptr);
+  EXPECT_EQ(accept_two->id, 401u);
+
+  // Both accepted sockets reference the exact same underlying launch session
+  EXPECT_EQ(accept_one, accept_two);
+
+  auto accept_three = rtsp_stream::test_support::simulate_accept_snapshot();
+  EXPECT_EQ(accept_three, accept_one);
+
+  // Snapshot remains peekable until revoked or cleared
+  EXPECT_EQ(rtsp_stream::test_support::peek_pending(), accept_one);
+}
+
+/**
+ * @brief Administrative revocation purges the pending snapshot under the lifecycle lane.
+ */
+TEST_F(RtspAdmissionBarrierTest, RevocationClearsSnapshotUnderLane) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Revoke Snapshot Client");
+  nvhttp::test_support::add_client("RevokeSnapshotClient", creds.x509, true, crypto::PERM::_all);
+
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 402;
+  launch->client_cert = creds.x509;
+  launch->perm = crypto::PERM::_all;
+  launch->unique_id = "test-revoke-402";
+
+  rtsp_stream::launch_session_raise(launch);
+  ASSERT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+  EXPECT_NE(rtsp_stream::test_support::peek_pending(), nullptr);
+
+  rtsp_stream::terminate_sessions_by_cert(creds.x509);
+
+  EXPECT_FALSE(rtsp_stream::test_support::has_pending_launch_session());
+  EXPECT_EQ(rtsp_stream::test_support::peek_pending(), nullptr);
+  EXPECT_EQ(rtsp_stream::test_support::simulate_accept_snapshot(), nullptr);
+}
+
+/**
+ * @brief An already-ready expiration callback cannot discard a replacement launch.
+ */
+TEST_F(RtspAdmissionBarrierTest, StaleExpirationCannotDiscardNewPendingLaunch) {
+  auto previous = std::make_shared<rtsp_stream::launch_session_t>();
+  previous->id = 901;
+  rtsp_stream::launch_session_raise(previous);
+  const auto previous_generation = rtsp_stream::test_support::pending_launch_generation();
+  rtsp_stream::launch_session_clear(previous->id);
+  rtsp_stream::test_support::drain_io_for_testing();
+  ASSERT_FALSE(rtsp_stream::test_support::has_pending_launch_session());
+
+  auto replacement = std::make_shared<rtsp_stream::launch_session_t>();
+  replacement->id = 902;
+  rtsp_stream::launch_session_raise(replacement);
+  const auto replacement_generation = rtsp_stream::test_support::pending_launch_generation();
+  ASSERT_NE(previous_generation, replacement_generation);
+  rtsp_stream::test_support::expire_pending_generation(previous_generation);
+  EXPECT_EQ(rtsp_stream::test_support::peek_pending(), replacement);
+  rtsp_stream::test_support::expire_pending_generation(replacement_generation);
+  EXPECT_FALSE(rtsp_stream::test_support::has_pending_launch_session());
+}
+
+/**
+ * @brief Launch session clear posted to executor clears pending snapshot without inline lock inversion.
+ */
+TEST_F(RtspAdmissionBarrierTest, LaunchSessionClearPostsToExecutorAndClearsSnapshot) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Clear Snapshot Client");
+  nvhttp::test_support::add_client("ClearSnapshotClient", creds.x509, true, crypto::PERM::_all);
+
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 403;
+  launch->client_cert = creds.x509;
+  launch->perm = crypto::PERM::_all;
+  launch->unique_id = "test-clear-403";
+
+  rtsp_stream::launch_session_raise(launch);
+  ASSERT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+
+  // Public launch_session_clear defers to server io_context
+  rtsp_stream::launch_session_clear(403);
+
+  // Before drain, the post is queued on the executor
+  rtsp_stream::test_support::drain_io_for_testing();
+
+  // After draining executor, pending session is cleared
+  EXPECT_FALSE(rtsp_stream::test_support::has_pending_launch_session());
+  EXPECT_EQ(rtsp_stream::test_support::peek_pending(), nullptr);
+}
+
+/**
+ * @brief Multi-TCP wire test verifying separate OPTIONS and DESCRIBE connections on ephemeral loopback.
+ *
+ * @details Spawns an isolated loopback test listener, raises a launch session, and transmits
+ *          real OPTIONS and DESCRIBE RTSP protocol frames over separate TCP connections. Both
+ *          connections must be accepted, dispatched to production handlers, and receive 200 OK.
+ */
+TEST_F(RtspAdmissionBarrierTest, MultiTcpWireOptionsDescribeOverSeparateConnections) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Wire RTSP Client");
+  nvhttp::test_support::add_client("WireClient", creds.x509, true, crypto::PERM::_all);
+
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->id = 404;
+  launch->client_cert = creds.x509;
+  launch->perm = crypto::PERM::_all;
+  launch->unique_id = "test-wire-404";
+  launch->iv.resize(16);
+
+  rtsp_stream::launch_session_raise(launch);
+  ASSERT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+
+  boost::system::error_code ec;
+  const uint16_t port = rtsp_stream::test_support::bind_loopback_ephemeral(ec);
+  ASSERT_EQ(ec.value(), 0);
+  ASSERT_GT(port, 0);
+
+  std::atomic<bool> running {true};
+  std::jthread io_worker([&]() {
+    while (running.load()) {
+      rtsp_stream::test_support::drain_io_for_testing();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  });
+
+  boost::asio::io_context client_io;
+
+  // 1. First TCP connection: send OPTIONS request
+  {
+    boost::asio::ip::tcp::socket sock(client_io);
+    sock.connect({boost::asio::ip::make_address("127.0.0.1"), port});
+
+    const std::string req = "OPTIONS rtsp://127.0.0.1/ RTSP/1.0\r\nCSeq: 1\r\n\r\n";
+    boost::asio::write(sock, boost::asio::buffer(req));
+
+    boost::asio::streambuf resp_buf;
+    boost::system::error_code read_ec;
+    boost::asio::read_until(sock, resp_buf, "\r\n\r\n", read_ec);
+    ASSERT_FALSE(read_ec);
+
+    const std::string resp {
+      boost::asio::buffers_begin(resp_buf.data()),
+      boost::asio::buffers_end(resp_buf.data())
+    };
+    EXPECT_NE(resp.find("RTSP/1.0 200 OK"), std::string::npos);
+    EXPECT_NE(resp.find("CSeq: 1"), std::string::npos);
+
+    boost::system::error_code close_ec;
+    sock.shutdown(boost::asio::ip::tcp::socket::shutdown_both, close_ec);
+    sock.close(close_ec);
+  }
+
+  // Pending launch session must still be intact for subsequent RTSP negotiation
+  EXPECT_TRUE(rtsp_stream::test_support::has_pending_launch_session());
+
+  // 2. Second TCP connection: send DESCRIBE request (new socket per Moonlight protocol)
+  {
+    boost::asio::ip::tcp::socket sock(client_io);
+    sock.connect({boost::asio::ip::make_address("127.0.0.1"), port});
+
+    const std::string req = "DESCRIBE rtsp://127.0.0.1/ RTSP/1.0\r\nCSeq: 2\r\n\r\n";
+    boost::asio::write(sock, boost::asio::buffer(req));
+
+    boost::asio::streambuf resp_buf;
+    boost::system::error_code read_ec;
+    boost::asio::read_until(sock, resp_buf, "\r\n\r\n", read_ec);
+    ASSERT_FALSE(read_ec);
+
+    const std::string resp {
+      boost::asio::buffers_begin(resp_buf.data()),
+      boost::asio::buffers_end(resp_buf.data())
+    };
+    EXPECT_NE(resp.find("RTSP/1.0 200 OK"), std::string::npos);
+    EXPECT_NE(resp.find("CSeq: 2"), std::string::npos);
+
+    boost::system::error_code close_ec;
+    sock.shutdown(boost::asio::ip::tcp::socket::shutdown_both, close_ec);
+    sock.close(close_ec);
+  }
+
+  running.store(false);
+  io_worker.join();
+  rtsp_stream::test_support::stop_test_server();
+}
+
+/**
+ * @brief Startup failure during admission abandons session without calling join or leaking state.
+ *
+ * @details When stream::session::start returns -1, admission disposes of the session
+ *          via abandon (cleaning input devices) and removes it from slots. It does NOT
+ *          invoke stop or join, preventing thread hangs and running_sessions underflow.
+ */
+TEST_F(RtspAdmissionBarrierTest, AdmissionStartFailureAbandonsSessionWithoutInvokingJoin) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Start Failure Client");
+  nvhttp::test_support::add_client("StartFailClient", creds.x509, true, crypto::PERM::_all);
+
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 405;
+  launch.client_cert = creds.x509;
+  launch.perm = crypto::PERM::_all;
+  launch.unique_id = "test-start-fail-405";
+  launch.iv.resize(16);
+
+  stream::config_t stream_config {};
+
+  // Inject start failure
+  rtsp_stream::test_support::set_start_session_hook([this](stream::session_t &, const std::string &) {
+    ++start_calls_;
+    return -1;
+  });
+
+  const int status = rtsp_stream::test_support::admit(stream_config, launch, "127.0.0.1");
+
+  EXPECT_EQ(status, 500);
+  EXPECT_EQ(start_calls_.load(), 1);
+  // Crucial: neither stop nor join may be invoked on an unstarted failed session
+  EXPECT_EQ(stop_calls_.load(), 0);
+  EXPECT_EQ(join_calls_.load(), 0);
+
+  // Slot collection must be cleanly cleared
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+  EXPECT_FALSE(rtsp_stream::test_support::has_session_for_cert(creds.x509));
+}
+
+/**
+ * @brief A throwing start removes the tracked session and abandons pre-start input.
+ */
+TEST_F(RtspAdmissionBarrierTest, ThrowingStartupRollsBackAdmission) {
+  const auto credentials = test_utils::certificates::generate_ca_credentials("Throwing Startup");
+  nvhttp::test_support::add_client("ThrowingStartup", credentials.x509, true, crypto::PERM::_all);
+  rtsp_stream::launch_session_t launch {};
+  launch.client_cert = credentials.x509;
+  launch.perm = crypto::PERM::_all;
+  launch.iv.resize(16);
+  stream::config_t configuration {};
+  std::shared_ptr<input::input_t> allocated_input;
+  rtsp_stream::test_support::set_start_session_hook([&](stream::session_t &session, const std::string &) -> int {
+    allocated_input = stream::session::input(session);
+    throw std::runtime_error("Injected startup exception");
+  });
+  EXPECT_EQ(rtsp_stream::test_support::admit(configuration, launch, "127.0.0.1"), 500);
+  EXPECT_EQ(rtsp_stream::session_count(), 0);
+  EXPECT_EQ(stop_calls_.load(), 0);
+  EXPECT_EQ(join_calls_.load(), 0);
+  ASSERT_TRUE(allocated_input);
+  EXPECT_TRUE(input::testing::is_input_stopped(allocated_input));
+}
+
+/**
+ * @brief Abandoning an unstarted session guarantees STOPPED state and cleans input without worker joins.
+ */
+TEST_F(RtspAdmissionBarrierTest, StreamSessionAbandonContract) {
+  const auto creds = test_utils::certificates::generate_ca_credentials("Abandon Contract Client");
+
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 406;
+  launch.client_cert = creds.x509;
+  launch.perm = crypto::PERM::_all;
+  launch.unique_id = "test-abandon-406";
+  launch.iv.resize(16);
+
+  stream::config_t stream_config {};
+  auto session = stream::session::alloc(stream_config, launch);
+  ASSERT_NE(session, nullptr);
+
+  // Initial allocated state is STOPPED
+  EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPED);
+
+  // Abandon transitions/guarantees state is STOPPED and cleans up input devices
+  stream::session::abandon(*session);
+  EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPED);
+  EXPECT_EQ(stream::session::input(*session), nullptr);
+
+  // Subsequent stop on abandoned STOPPED session returns immediately without hanging
+  stream::session::stop(*session);
+  EXPECT_EQ(stream::session::state(*session), stream::session::state_e::STOPPED);
 }

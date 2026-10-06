@@ -141,6 +141,31 @@ Administrative mutation of client permissions and connection authorization is ex
 - **Verification scope**: The parent independently built strict native targets and passed 108 selected tests including real loopback TLS action requests. Positive launch tests bypass encoder probing and process execution through a test-only seam after authorization; they are not live streaming acceptance. The seam is reset in fixture teardown.
 - **Re-Pair Restrictions**: Re-pairing an existing client preserves both its configured permissions and its disabled state without privilege escalation.
 
+## Permission-reduction concurrency checkpoint — 2026-10-06
+
+- RTSP admission, registry revalidation, session insertion/start, and targeted
+  teardown share a lifecycle lane. Teardown extracts sessions under the slot
+  mutex, then stops/joins them outside that slot mutex. This is a synchronization
+  boundary, not a wall-clock timeout guarantee for hardware/backend operations.
+- Moonlight opens separate TCP connections for RTSP negotiation messages. Each
+  accepted socket therefore receives a reusable, non-consuming pending-launch
+  snapshot; accepting `OPTIONS` must not consume the ticket needed by `DESCRIBE`
+  or later messages. Loopback wire tests cover those first two transactions.
+- Control-thread launch cleanup is posted to the RTSP executor rather than taking
+  the lifecycle mutex while holding the control-session mutex. Numeric launch IDs
+  prevent a delayed clear from removing an unrelated pending launch.
+- Timer callbacks carry a launch generation, so a completed old expiration cannot
+  discard a replacement ticket. Startup failures and exceptions remove the slot
+  and abandon pre-start resources without joining an unstarted session or changing
+  the running-session counter. Partial worker startup signals shutdown and joins
+  any created workers before releasing shared broadcast resources.
+- The parent built both native targets with `BUILD_WERROR=ON`, tray disabled, and
+  passed **158 selected tests** from 15 suites. These include real single-worker
+  executor tests, deterministic admission/teardown barriers, fault injection and
+  loopback TLS/RTSP requests. Hardware pipelines in admission tests are replaced
+  with test-only hooks; real Windows streaming, POSIX behavior, coverage percentages
+  and independently isolated per-client keyboard/mouse state remain unverified.
+
 ## Atomic Persistence and Filesystem Boundary Guarantees
 
 Paired-client registry persistence through `nvhttp::save_state()` now uses `file_handler::write_file_atomic`. Other configuration/application-file writers are unchanged by this slice and are not covered by these guarantees:

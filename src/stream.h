@@ -85,6 +85,12 @@ namespace stream {
      */
     void join(session_t &session);
     /**
+     * @brief Abandon an unstarted session and release pre-start resources.
+     *
+     * @param session Streaming session to abandon.
+     */
+    void abandon(session_t &session);
+    /**
      * @brief Platform handle returned from stream setup.
      *
      * @param session Active streaming or pairing session for the request.

@@ -465,6 +465,10 @@ namespace rtsp_stream {
     std::shared_ptr<launch_session_t> session;  ///< Launch session claimed by this RTSP socket.
   };
 
+  class rtsp_server_t;
+  void cmd_option(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req);
+  void cmd_describe(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req);
+
   /**
    * @brief RTSP listener that matches incoming clients to pending launch sessions.
    */
@@ -480,10 +484,17 @@ namespace rtsp_stream {
      * @param af Address family used for socket creation or binding.
      * @param port TCP or UDP port number.
      * @param ec Error code returned by the asynchronous operation.
+     * @param override_bind_addr Optional bind address override (e.g. for loopback tests).
      * @return Network operation status.
      */
-    int bind(net::af_e af, std::uint16_t port, boost::system::error_code &ec) {
+    int bind(net::af_e af, std::uint16_t port, boost::system::error_code &ec, const std::string &override_bind_addr = "") {
       af = net::get_effective_address_family(af);
+      if (acceptor.is_open()) {
+        boost::system::error_code close_ec;
+        acceptor.close(close_ec);
+      }
+      io_context.restart();
+
       acceptor.open(af == net::IPV4 ? tcp::v4() : tcp::v6(), ec);
       if (ec) {
         return -1;
@@ -491,7 +502,7 @@ namespace rtsp_stream {
 
       acceptor.set_option(boost::asio::socket_base::reuse_address {true});
 
-      auto bind_addr_str = net::get_bind_address(af);
+      auto bind_addr_str = override_bind_addr.empty() ? net::get_bind_address(af) : override_bind_addr;
       const auto bind_addr = boost::asio::ip::make_address(bind_addr_str, ec);
       if (ec) {
         BOOST_LOG(error) << "Invalid bind address: "sv << bind_addr_str << " - " << ec.message();
@@ -520,6 +531,17 @@ namespace rtsp_stream {
     }
 
     /**
+     * @brief Query the local port number to which the acceptor is currently bound.
+     *
+     * @return Local port number, or 0 if unbound or on error.
+     */
+    uint16_t port() const {
+      boost::system::error_code ec;
+      auto ep = acceptor.local_endpoint(ec);
+      return ec ? 0 : ep.port();
+    }
+
+    /**
      * @brief Dispatch a parsed RTSP request to its handler.
      *
      * @param sock Socket used to read or write the protocol message.
@@ -539,6 +561,32 @@ namespace rtsp_stream {
     }
 
     /**
+     * @brief Safely close an RTSP client socket without throwing.
+     *
+     * @param socket Connected socket wrapper to close.
+     */
+    static void close_socket(const std::shared_ptr<socket_t> &socket) {
+      if (!socket) {
+        return;
+      }
+      boost::system::error_code ec;
+      socket->sock.close(ec);
+    }
+
+    /**
+     * @brief Take a non-consuming snapshot of the pending launch session under the lifecycle mutex.
+     *
+     * @details Returns a shared pointer to the pending launch session without popping
+     *          the launch event or cancelling the timeout deadline, allowing subsequent
+     *          RTSP TCP connections from the same client to reuse the pending session.
+     * @return Shared pointer to the pending launch session, or nullptr if none pending.
+     */
+    std::shared_ptr<launch_session_t> peek_pending() {
+      std::lock_guard lg(_lifecycle_mutex);
+      return launch_event.view(0s);
+    }
+
+    /**
      * @brief Accept a pending connection and arm the server for the next client.
      *
      * @param ec Error code returned by the asynchronous operation.
@@ -554,18 +602,17 @@ namespace rtsp_stream {
 
       auto socket = std::move(next_socket);
 
-      auto launch_session {launch_event.view(0s)};
+      auto launch_session = peek_pending();
       if (launch_session) {
         // Associate the current RTSP session with this socket and start reading
-        socket->session = launch_session;
+        socket->session = std::move(launch_session);
         socket->read();
       } else {
         // This can happen due to normal things like port scanning, so let's not make these visible by default
         BOOST_LOG(debug) << "No pending session for incoming RTSP connection"sv;
 
         // If there is no session pending, close the connection immediately
-        boost::system::error_code ec;
-        socket->sock.close(ec);
+        close_socket(socket);
       }
 
       // Queue another asynchronous accept for the next incoming connection
@@ -594,6 +641,8 @@ namespace rtsp_stream {
      * @param launch_session Streaming session information.
      */
     void session_raise(std::shared_ptr<launch_session_t> launch_session) {
+      std::lock_guard lg(_lifecycle_mutex);
+
       // If a launch event is still pending, don't overwrite it.
       if (launch_event.view(0s)) {
         return;
@@ -601,17 +650,30 @@ namespace rtsp_stream {
 
       // Raise the new launch session to prepare for the RTSP handshake
       launch_event.raise(std::move(launch_session));
+      const auto generation = ++_pending_launch_generation;
 
       // Arm the timer to expire this launch session if the client times out
       raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
+      raised_timer.async_wait([this, generation](const boost::system::error_code &ec) {
         if (!ec) {
-          auto discarded = launch_event.pop(0s);
-          if (discarded) {
-            BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
-          }
+          expire_pending(generation);
         }
       });
+    }
+
+    /**
+     * @brief Expire only the launch generation that armed the completed timer.
+     * @param generation Generation captured when scheduling the timer callback.
+     */
+    void expire_pending(uint64_t generation) {
+      std::lock_guard lg(_lifecycle_mutex);
+      if (generation != _pending_launch_generation) {
+        return;
+      }
+      auto discarded = launch_event.pop(0s);
+      if (discarded) {
+        BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+      }
     }
 
     /**
@@ -619,6 +681,8 @@ namespace rtsp_stream {
      * @param launch_session_id The ID of the session to clear.
      */
     void session_clear(uint32_t launch_session_id) {
+      std::lock_guard lg(_lifecycle_mutex);
+
       // We currently only support a single pending RTSP session,
       // so the ID should always match the one for that session.
       auto launch_session = launch_event.view(0s);
@@ -630,6 +694,20 @@ namespace rtsp_stream {
           launch_event.pop();
         }
       }
+    }
+
+    /**
+     * @brief Post a deferred session_clear invocation to the io_context executor.
+     *
+     * @details Accepts only the numeric launch_session_id without capturing raw launch
+     *          session objects or certificate buffers. Prevents lock-order deadlock
+     *          between control_server_t::_sessions lock and _lifecycle_mutex.
+     * @param launch_session_id ID of the launch session to clear.
+     */
+    void post_session_clear(uint32_t launch_session_id) {
+      boost::asio::post(io_context, [this, launch_session_id]() {
+        session_clear(launch_session_id);
+      });
     }
 
     /**
@@ -651,50 +729,260 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
+      std::lock_guard lg(_lifecycle_mutex);
+
       if (all) {
         raised_timer.cancel();
         launch_event.pop(0s);
       }
 
-      auto lg = _session_slots.lock();
-
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+      std::vector<std::shared_ptr<stream::session_t>> to_stop;
+      {
+        auto lg_slots = _session_slots.lock();
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+          if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
+            to_stop.push_back(*i);
+            i = _session_slots->erase(i);
+          } else {
+            ++i;
+          }
         }
+      }
+
+      for (auto &slot : to_stop) {
+        stop_session(*slot);
+        join_session(*slot);
       }
     }
 
     /**
-     * @brief Clear by cert state.
+     * @brief Clear active and pending sessions associated with a client certificate.
+     *
+     * @details Synchronized under the dedicated admission lifecycle lane mutex. Upon return,
+     *          any matching pending launch session is cancelled and active sessions
+     *          are guaranteed stopped and joined. Any in-flight RTSP ANNOUNCE handshake
+     *          for this certificate that was in progress prior to return either commits
+     *          and is torn down before return, or arrives after return and fails closed
+     *          (403 Forbidden) against the updated client registry.
+     *          Matching session entries are erased immediately from the slot collection
+     *          under the slot snapshot lock before worker threads are joined outside
+     *          the slot lock, ensuring slot snapshot inspection does not block.
      *
      * @param cert Certificate data or object used by the operation.
      */
     void clear_by_cert(std::string_view cert) {
+      std::lock_guard lg(_lifecycle_mutex);
+
       auto pending = launch_event.view(0s);
       if (pending && pending->client_cert == cert) {
         raised_timer.cancel();
         launch_event.pop(0s);
       }
 
-      auto lg = _session_slots.lock();
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (stream::session::client_cert(slot) == cert) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+      std::vector<std::shared_ptr<stream::session_t>> to_stop;
+      {
+        auto lg_slots = _session_slots.lock();
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+          if (stream::session::client_cert(slot) == cert) {
+            to_stop.push_back(*i);
+            i = _session_slots->erase(i);
+          } else {
+            ++i;
+          }
         }
       }
+
+      for (auto &slot : to_stop) {
+        stop_session(*slot);
+        join_session(*slot);
+      }
     }
+
+    /**
+     * @brief Start worker pipelines for a streaming session.
+     *
+     * @param session Active streaming session being started.
+     * @param addr_string Peer address string.
+     * @return 0 on success, non-zero on failure.
+     */
+    int start_session(stream::session_t &session, const std::string &addr_string) {
+#ifdef SUNSHINE_TESTS
+      if (test_start_session_hook) {
+        return test_start_session_hook(session, addr_string);
+      }
+#endif
+      return stream::session::start(session, addr_string);
+    }
+
+    /**
+     * @brief Stop worker pipelines for a streaming session.
+     *
+     * @param session Active streaming session being stopped.
+     */
+    void stop_session(stream::session_t &session) {
+#ifdef SUNSHINE_TESTS
+      if (test_stop_session_hook) {
+        test_stop_session_hook(session);
+        return;
+      }
+#endif
+      stream::session::stop(session);
+    }
+
+    /**
+     * @brief Wait for worker pipelines for a streaming session to exit.
+     *
+     * @param session Active streaming session being joined.
+     */
+    void join_session(stream::session_t &session) {
+#ifdef SUNSHINE_TESTS
+      if (test_join_session_hook) {
+        test_join_session_hook(session);
+        return;
+      }
+#endif
+      stream::session::join(session);
+    }
+
+    /**
+     * @brief Admit and start a streaming session under the dedicated lifecycle lane lock.
+     *
+     * @param config Streaming session configuration.
+     * @param session Launch session parameters and credentials.
+     * @param peer_address Peer network address string.
+     * @return RTSP/HTTP status code (200 on success, 403 on authorization failure, 500 on internal error).
+     */
+    int admit(stream::config_t &config, launch_session_t &session, const std::string &peer_address) {
+      std::lock_guard lg(_lifecycle_mutex);
+
+      const auto client_rec = !session.client_cert.empty()
+        ? nvhttp::get_client_record(session.client_cert)
+        : nvhttp::client_record_t {};
+
+      if (!client_rec.found || !client_rec.enabled || !bool(client_rec.perm & crypto::PERM::_allow_view)) {
+        BOOST_LOG(error) << "Rejecting RTSP ANNOUNCE: client is not authorized or lacking view permission"sv;
+        return 403;
+      }
+
+      session.perm = client_rec.perm;
+
+#ifdef SUNSHINE_TESTS
+      if (test_pause_before_alloc_hook) {
+        test_pause_before_alloc_hook(session);
+      }
+#endif
+
+      auto stream_session = stream::session::alloc(config, session);
+      if (!stream_session) {
+        BOOST_LOG(error) << "Failed to allocate streaming session"sv;
+        return 500;
+      }
+
+      insert(stream_session);
+
+      auto rollback = util::fail_guard([&] {
+        remove(stream_session);
+        stream::session::abandon(*stream_session);
+      });
+      try {
+        if (start_session(*stream_session, peer_address)) {
+          BOOST_LOG(error) << "Failed to start a streaming session"sv;
+          return 500;
+        }
+      } catch (const std::exception &exception) {
+        BOOST_LOG(error) << "Streaming session startup threw: "sv << exception.what();
+        return 500;
+      } catch (...) {
+        BOOST_LOG(error) << "Streaming session startup threw an unknown exception"sv;
+        return 500;
+      }
+
+      rollback.disable();
+      return 200;
+    }
+
+#ifdef SUNSHINE_TESTS
+    /**
+     * @brief Install a test hook invoked before session allocation during admission.
+     *
+     * @param hook Callback invoked with the launch session being admitted.
+     */
+    void set_pause_before_alloc_hook(std::function<void(const launch_session_t &)> hook) {
+      test_pause_before_alloc_hook = std::move(hook);
+    }
+
+    /**
+     * @brief Install a test hook replacing stream::session::start during admission.
+     *
+     * @param hook Callback invoked with session and peer address string.
+     */
+    void set_start_session_hook(std::function<int(stream::session_t &, const std::string &)> hook) {
+      test_start_session_hook = std::move(hook);
+    }
+
+    /**
+     * @brief Install a test hook replacing stream::session::stop during teardown.
+     *
+     * @param hook Callback invoked with session being stopped.
+     */
+    void set_stop_session_hook(std::function<void(stream::session_t &)> hook) {
+      test_stop_session_hook = std::move(hook);
+    }
+
+    /**
+     * @brief Install a test hook replacing stream::session::join during teardown.
+     *
+     * @param hook Callback invoked with session being joined.
+     */
+    void set_join_session_hook(std::function<void(stream::session_t &)> hook) {
+      test_join_session_hook = std::move(hook);
+    }
+
+    /**
+     * @brief Reset all installed test hooks to empty functions.
+     */
+    void reset_test_hooks() {
+      test_pause_before_alloc_hook = nullptr;
+      test_start_session_hook = nullptr;
+      test_stop_session_hook = nullptr;
+      test_join_session_hook = nullptr;
+    }
+
+    /**
+     * @brief Check whether an active streaming session exists for the specified certificate.
+     *
+     * @param cert Client certificate PEM string.
+     * @return True if a matching active session is tracked.
+     */
+    bool has_session_for_cert(std::string_view cert) {
+      auto lg = _session_slots.lock();
+      for (const auto &slot : *_session_slots) {
+        if (stream::session::client_cert(*slot) == cert) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /**
+     * @brief Simulate production handle_accept snapshot association under the lifecycle lane.
+     *
+     * @return The session snapshot bound to the accepted socket, or nullptr.
+     */
+    std::shared_ptr<launch_session_t> simulate_accept_snapshot() {
+      auto launch_session = peek_pending();
+      if (launch_session) {
+        auto simulated_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
+          handle_msg(sock, session, std::move(msg));
+        });
+        simulated_socket->session = launch_session;
+        return simulated_socket->session;
+      }
+      return nullptr;
+    }
+#endif
 
     /**
      * @brief Removes the provided session from the set of sessions.
@@ -732,15 +1020,78 @@ namespace rtsp_stream {
      * @brief Stop the RTSP server.
      */
     void stop() {
-      acceptor.close();
+      std::lock_guard lg(_lifecycle_mutex);
+      boost::system::error_code ec;
+      acceptor.close(ec);
       io_context.stop();
       clear();
+    }
+
+#ifdef SUNSHINE_TESTS
+    /**
+     * @brief Drain pending queued tasks on the io_context executor for deterministic tests.
+     */
+    void drain_io_for_testing() {
+      if (io_context.stopped()) {
+        io_context.restart();
+      }
+      io_context.poll();
+    }
+#endif
+
+    /**
+     * @brief Check whether a launch session is currently pending.
+     *
+     * @return True if a pending launch session is waiting for RTSP connection.
+     */
+    /**
+     * @brief Obtain the pending launch timer identity for deterministic timer tests.
+     * @return Current launch generation under lifecycle serialization.
+     */
+    uint64_t pending_launch_generation_for_testing() {
+      std::lock_guard lg(_lifecycle_mutex);
+      return _pending_launch_generation;
+    }
+
+    bool has_pending_launch_session() {
+      std::lock_guard lg(_lifecycle_mutex);
+      return bool(launch_event.view(0s));
+    }
+
+    /**
+     * @brief Query the client certificate of the pending launch session if any.
+     *
+     * @return PEM certificate of the pending launch session, or empty string.
+     */
+    std::string pending_launch_session_cert() {
+      std::lock_guard lg(_lifecycle_mutex);
+      auto pending = launch_event.view(0s);
+      return pending ? pending->client_cert : std::string {};
     }
 
   private:
     std::unordered_map<std::string_view, cmd_func_t> _map_cmd_cb;
 
     sync_util::sync_t<std::set<std::shared_ptr<stream::session_t>>> _session_slots;
+    /**
+     * @brief Dedicated admission and teardown lifecycle lane mutex.
+     *
+     * @details A recursive_mutex is deliberately utilized here because nested calls
+     *          within the same execution context (for example, session_count() invoking
+     *          clear(false) to reap terminated sessions, or nested stream start callbacks)
+     *          re-acquire the lifecycle lane. Across distinct threads, it provides strict
+     *          mutual exclusion across session admission, client revocation (clear_by_cert),
+     *          launch session claim handoff (claim_pending), and teardown.
+     */
+    std::recursive_mutex _lifecycle_mutex;
+    uint64_t _pending_launch_generation {0};  ///< Timer identity; guarded by the lifecycle mutex.
+
+#ifdef SUNSHINE_TESTS
+    std::function<void(const launch_session_t &)> test_pause_before_alloc_hook;
+    std::function<int(stream::session_t &, const std::string &)> test_start_session_hook;
+    std::function<void(stream::session_t &)> test_stop_session_hook;
+    std::function<void(stream::session_t &)> test_join_session_hook;
+#endif
 
     boost::asio::io_context io_context;
     tcp::acceptor acceptor {io_context};
@@ -759,7 +1110,7 @@ namespace rtsp_stream {
   }
 
   void launch_session_clear(uint32_t launch_session_id) {
-    server.session_clear(launch_session_id);
+    server.post_session_clear(launch_session_id);
   }
 
   int session_count() {
@@ -802,21 +1153,81 @@ namespace rtsp_stream {
 
 #ifdef SUNSHINE_TESTS
   namespace test_support {
+    uint64_t pending_launch_generation() {
+      return server.pending_launch_generation_for_testing();
+    }
+
+    void expire_pending_generation(uint64_t generation) {
+      server.expire_pending(generation);
+    }
     void set_terminate_sessions_hook(std::function<void(std::string_view)> hook) {
       terminate_sessions_hook() = std::move(hook);
     }
 
+    void set_pause_before_alloc_hook(std::function<void(const launch_session_t &)> hook) {
+      server.set_pause_before_alloc_hook(std::move(hook));
+    }
+
+    void set_start_session_hook(std::function<int(stream::session_t &, const std::string &)> hook) {
+      server.set_start_session_hook(std::move(hook));
+    }
+
+    void set_stop_session_hook(std::function<void(stream::session_t &)> hook) {
+      server.set_stop_session_hook(std::move(hook));
+    }
+
+    void set_join_session_hook(std::function<void(stream::session_t &)> hook) {
+      server.set_join_session_hook(std::move(hook));
+    }
+
+    void reset_test_hooks() {
+      server.reset_test_hooks();
+      terminate_sessions_hook() = nullptr;
+    }
+
     bool has_pending_launch_session() {
-      return bool(server.launch_event.view(0s));
+      return server.has_pending_launch_session();
     }
 
     std::string pending_launch_session_cert() {
-      auto pending = server.launch_event.view(0s);
-      return pending ? pending->client_cert : std::string {};
+      return server.pending_launch_session_cert();
+    }
+
+    std::shared_ptr<launch_session_t> peek_pending() {
+      return server.peek_pending();
+    }
+
+    void drain_io_for_testing() {
+      server.drain_io_for_testing();
+    }
+
+    uint16_t bind_loopback_ephemeral(boost::system::error_code &ec) {
+      server.map("OPTIONS"sv, &cmd_option);
+      server.map("DESCRIBE"sv, &cmd_describe);
+      if (server.bind(net::IPV4, 0, ec, "127.0.0.1")) {
+        return 0;
+      }
+      return server.port();
+    }
+
+    void stop_test_server() {
+      server.stop();
+    }
+
+    std::shared_ptr<launch_session_t> simulate_accept_snapshot() {
+      return server.simulate_accept_snapshot();
     }
 
     void clear_all() {
       server.clear(true);
+    }
+
+    int admit(stream::config_t &config, launch_session_t &session, const std::string &peer_address) {
+      return server.admit(config, session, peer_address);
+    }
+
+    bool has_session_for_cert(std::string_view cert) {
+      return server.has_session_for_cert(cert);
     }
   }  // namespace test_support
 #endif
@@ -1350,29 +1761,12 @@ namespace rtsp_stream {
       return;
     }
 
-    // Revalidate client against pairing registry before production RTSP allocation / stream start
-    if (!session.client_cert.empty()) {
-      const auto client_rec = nvhttp::get_client_record(session.client_cert);
-      if (!client_rec.found || !client_rec.enabled || !bool(client_rec.perm & crypto::PERM::_allow_view)) {
-        BOOST_LOG(error) << "Rejecting RTSP PLAY: client is not authorized or lacking view permission"sv;
-        respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
-        return;
-      }
-      session.perm = client_rec.perm;
-    }
-
-    auto stream_session = stream::session::alloc(config, session);
-    if (!stream_session) {
-      BOOST_LOG(error) << "Failed to allocate streaming session"sv;
-      respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
+    const auto status = server->admit(config, session, sock.remote_endpoint().address().to_string());
+    if (status == 403) {
+      respond(sock, session, &option, 403, "Forbidden", req->sequenceNumber, {});
       return;
     }
-    server->insert(stream_session);
-
-    if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {
-      BOOST_LOG(error) << "Failed to start a streaming session"sv;
-
-      server->remove(stream_session);
+    if (status != 200) {
       respond(sock, session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
       return;
     }
