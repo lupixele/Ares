@@ -1,8 +1,11 @@
 <template>
   <Navbar></Navbar>
-  <div id="content" class="container">
+  <div id="content" class="container" :aria-busy="isMutating">
+    <div v-if="isMutating" class="visually-hidden" role="status" aria-live="polite">
+      {{ $t('_common.loading') }}
+    </div>
     <h1 class="my-4 text-center">{{ $t('pin.pin_pairing') }}</h1>
-    <form class="form d-flex flex-column align-items-center" id="form" @submit.prevent="registerDevice">
+    <form class="form d-flex flex-column align-items-center" id="form" @submit.prevent="registerDevice" :aria-busy="isMutating">
       <div class="card flex-column d-flex p-4 mb-4">
         <div class="input-group mt-2">
           <label for="pairing-input" class="visually-hidden">{{ $t('pin.select_pairing') }}</label>
@@ -20,7 +23,7 @@
           <button
             type="button"
             class="btn btn-outline-danger"
-            :disabled="!selectedPairingId"
+            :disabled="!selectedPairingId || isMutating"
             :title="$t('pin.cancel_pairing')"
             @click="cancelSelectedPairing"
           >
@@ -43,7 +46,7 @@
           <input v-model="name" type="text" class="form-control" id="name-input"
             :placeholder="`${$t('pin.device_name')} (${$t('_common.optional')})`" />
         </div>
-        <button type="submit" class="btn btn-primary mt-4">
+        <button type="submit" class="btn btn-primary mt-4" :disabled="isMutating">
           <forward :size="18" class="icon"></forward>
           {{ $t('pin.send') }}
         </button>
@@ -57,7 +60,7 @@
     <hr class="my-5" />
 
     <!-- Authenticated Paired Clients Administration Section -->
-    <section id="paired-clients-section" class="w-100 my-4" aria-labelledby="paired-clients-heading">
+    <section id="paired-clients-section" class="w-100 my-4" aria-labelledby="paired-clients-heading" :aria-busy="isMutating">
       <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
           <h2 id="paired-clients-heading" class="h3 mb-1">{{ $t('pin.paired_clients_title') }}</h2>
@@ -65,7 +68,7 @@
         <button
           type="button"
           class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center gap-1"
-          :disabled="clientsLoading"
+          :disabled="clientsLoading || isMutating"
           @click="loadClients"
         >
           <refresh-cw :size="16" :class="{ 'spin': clientsLoading }"></refresh-cw>
@@ -79,7 +82,7 @@
         </div>
       </div>
 
-      <div v-else-if="clientsError" class="alert alert-danger" role="alert">
+      <div v-else-if="clientsError && !clients.length" class="alert alert-danger" role="alert">
         {{ clientsError }}
       </div>
 
@@ -88,11 +91,15 @@
       </div>
 
       <div v-else class="d-flex flex-column gap-4">
+        <div v-if="clientsError" class="alert alert-danger" role="alert">
+          {{ clientsError }}
+        </div>
         <div
           v-for="client in clients"
           :key="client.uuid"
           class="card shadow-sm"
           :data-client-uuid="client.uuid"
+          :aria-busy="client.saving || isMutating"
         >
           <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
             <div>
@@ -267,7 +274,7 @@
                 <button
                   type="button"
                   class="btn btn-sm btn-danger d-inline-flex align-items-center gap-1 btn-confirm-save"
-                  :disabled="client.saving"
+                  :disabled="client.saving || isMutating"
                   @click="confirmSave(client)"
                 >
                   <check :size="16"></check>
@@ -276,7 +283,7 @@
                 <button
                   type="button"
                   class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1 btn-cancel-confirm"
-                  :disabled="client.saving"
+                  :disabled="client.saving || isMutating"
                   @click="cancelConfirm(client)"
                 >
                   <x :size="16"></x>
@@ -289,6 +296,9 @@
             <div v-if="client.error" class="alert alert-danger mt-3 mb-0" role="alert">
               {{ client.error }}
             </div>
+            <div v-if="client.refreshError" class="alert alert-warning alert-refresh mt-3 mb-0" role="alert">
+              {{ client.refreshError }}
+            </div>
             <div v-if="client.successMessage" class="alert alert-success mt-3 mb-0" role="alert">
               {{ client.successMessage }}
             </div>
@@ -298,7 +308,7 @@
             <button
               type="button"
               class="btn btn-primary d-inline-flex align-items-center gap-1 btn-save-client"
-              :disabled="!isDirty(client) || client.saving"
+              :disabled="!isDirty(client) || client.saving || isMutating"
               @click="handleSaveClick(client)"
             >
               <span v-if="client.saving" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
@@ -309,7 +319,7 @@
             <button
               type="button"
               class="btn btn-outline-secondary d-inline-flex align-items-center gap-1 btn-reset-draft"
-              :disabled="!isDirty(client) || client.saving"
+              :disabled="!isDirty(client) || client.saving || isMutating"
               @click="resetDraft(client)"
             >
               <rotate-ccw :size="16" class="icon"></rotate-ccw>
@@ -319,7 +329,7 @@
             <button
               type="button"
               class="btn btn-outline-danger btn-sm ms-auto d-inline-flex align-items-center gap-1 btn-unpair-client"
-              :disabled="client.saving"
+              :disabled="client.saving || isMutating"
               :title="$t('pin.unpair_client')"
               @click="unpairClient(client)"
             >
@@ -360,6 +370,27 @@
     X,
   } from '@lucide/vue'
 
+  /**
+   * @brief Extract a shallow snapshot of a client draft's boolean fields.
+   *
+   * @param {object} draft Client draft object.
+   * @return {object|null} Shallow snapshot containing boolean fields only.
+   */
+  function extractDraftSnapshot(draft) {
+    if (!draft) return null;
+    return {
+      enabled: Boolean(draft.enabled),
+      controller: Boolean(draft.controller),
+      touch: Boolean(draft.touch),
+      pen: Boolean(draft.pen),
+      mouse: Boolean(draft.mouse),
+      keyboard: Boolean(draft.keyboard),
+      list: Boolean(draft.list),
+      view: Boolean(draft.view),
+      launch: Boolean(draft.launch),
+    };
+  }
+
   export {
     PERM_BITS,
     EDITABLE_PERM_MASK,
@@ -367,6 +398,7 @@
     flagsToMask,
     computeOutgoingPerm,
     isReductionOrDisable,
+    extractDraftSnapshot,
   }
 
   export default {
@@ -403,7 +435,22 @@
         clients: [],
         clientsLoading: false,
         clientsError: null,
+        clientsRequestId: 0,
+        latestCompletedClientsRequestId: 0,
+        minValidClientsRequestId: 0,
+        isMutating: false,
       };
+    },
+    computed: {
+      busy() {
+        return this.isMutating;
+      },
+      isBusy() {
+        return this.isMutating;
+      },
+      mutationBusy() {
+        return this.isMutating;
+      },
     },
     mounted() {
       this.loadPendingPairings();
@@ -439,66 +486,99 @@
        * Apply the entered PIN only to the pairing request selected by the operator.
        */
       async registerDevice() {
+        if (this.isMutating) return;
         this.status = null;
         if (!this.selectedPairingId) {
           this.status = {type: 'danger', message: this.i18n.t('pin.select_pairing_required')};
           return;
         }
 
-        const body = JSON.stringify({
-          pairing_id: this.selectedPairingId,
-          pin: this.pin,
-          name: this.name,
-        });
-        const response = await apiFetch('./api/pin', {
-          method: "POST",
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body,
-        });
-        const result = await response.json();
-        if (result.status === true) {
-          this.status = {type: 'success', message: this.i18n.t('pin.pair_success')};
-          this.pin = '';
-          this.name = '';
-        } else {
+        this.isMutating = true;
+        try {
+          const body = JSON.stringify({
+            pairing_id: this.selectedPairingId,
+            pin: this.pin,
+            name: this.name,
+          });
+          const response = await apiFetch('./api/pin', {
+            method: "POST",
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body,
+          });
+          const result = await response.json();
+          if (result && result.status === true) {
+            this.status = {type: 'success', message: this.i18n.t('pin.pair_success')};
+            this.pin = '';
+            this.name = '';
+            this.minValidClientsRequestId = this.clientsRequestId + 1;
+          } else {
+            this.status = {type: 'danger', message: (result && result.error) || this.i18n.t('pin.pair_failure')};
+          }
+          await this.loadPendingPairings();
+          await this.loadClients();
+        } catch (error) {
+          console.error('Failed to pair device', error);
           this.status = {type: 'danger', message: this.i18n.t('pin.pair_failure')};
+        } finally {
+          this.isMutating = false;
         }
-        await this.loadPendingPairings();
-        await this.loadClients();
       },
 
       /**
        * Cancel the selected pending request without affecting other clients.
        */
       async cancelSelectedPairing() {
-        if (!this.selectedPairingId) {
+        if (this.isMutating || !this.selectedPairingId) {
           return;
         }
 
-        const response = await apiFetch('./api/pin', {
-          method: "DELETE",
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            pairing_id: this.selectedPairingId,
-          }),
-        });
-        const result = await response.json();
-        if (result.status === true) {
-          this.status = {type: 'success', message: this.i18n.t('pin.cancel_success')};
-        } else {
+        this.isMutating = true;
+        try {
+          const response = await apiFetch('./api/pin', {
+            method: "DELETE",
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              pairing_id: this.selectedPairingId,
+            }),
+          });
+          const result = await response.json();
+          if (result && result.status === true) {
+            this.status = {type: 'success', message: this.i18n.t('pin.cancel_success')};
+          } else {
+            this.status = {type: 'danger', message: (result && result.error) || this.i18n.t('pin.cancel_failure')};
+          }
+          await this.loadPendingPairings();
+        } catch (error) {
+          console.error('Failed to cancel pairing', error);
           this.status = {type: 'danger', message: this.i18n.t('pin.cancel_failure')};
+        } finally {
+          this.isMutating = false;
         }
-        await this.loadPendingPairings();
+      },
+
+      /**
+       * Check if a client list request ID has been superseded by a newer
+       * completed response or invalidated by a confirmed mutation.
+       *
+       * @param {number} requestId - Request ID.
+       * @returns {boolean} True if response/error should be ignored.
+       */
+      isSuperseded(requestId) {
+        return (
+          requestId < this.latestCompletedClientsRequestId ||
+          requestId < this.minValidClientsRequestId
+        );
       },
 
       /**
        * Load authenticated list of paired clients.
        */
       async loadClients() {
+        const requestId = ++this.clientsRequestId;
         this.clientsLoading = true;
         this.clientsError = null;
         try {
@@ -507,16 +587,27 @@
             throw new Error(`HTTP ${response.status}`);
           }
           const data = await response.json();
+          if (this.isSuperseded(requestId)) {
+            return { success: false, superseded: true };
+          }
           if (data && data.status !== false && Array.isArray(data.named_certs)) {
             this.syncClientsList(data.named_certs);
+            this.latestCompletedClientsRequestId = requestId;
+            return { success: true, named_certs: data.named_certs };
           } else {
             throw new Error(data?.error || this.i18n.t('pin.load_clients_failed'));
           }
         } catch (err) {
+          if (this.isSuperseded(requestId) || requestId < this.clientsRequestId) {
+            return { success: false, superseded: true };
+          }
           console.error('Failed to load paired clients', err);
           this.clientsError = err.message || this.i18n.t('pin.load_clients_failed');
+          return { success: false, error: this.clientsError };
         } finally {
-          this.clientsLoading = false;
+          if (requestId === this.clientsRequestId) {
+            this.clientsLoading = false;
+          }
         }
       },
 
@@ -537,8 +628,40 @@
 
           if (existing) {
             existing.name = cert.name;
-            // Preserve operator draft and baseline if client is currently dirty or saving
-            if (!this.isDirty(existing) && !existing.saving) {
+            if (existing._pendingReconcile) {
+              const submitted = existing._pendingReconcile.submittedDraft;
+              delete existing._pendingReconcile;
+
+              // Reconcile baseline authoritatively from server response
+              existing.persisted = {
+                enabled: serverEnabled,
+                perm: serverPerm,
+                flags: serverFlags,
+              };
+
+              // Reconcile draft: preserve edits made after submission
+              const flagKeys = [
+                'controller',
+                'touch',
+                'pen',
+                'mouse',
+                'keyboard',
+                'list',
+                'view',
+                'launch',
+              ];
+              for (const key of flagKeys) {
+                if (existing.draft[key] === submitted[key]) {
+                  existing.draft[key] = serverFlags[key];
+                }
+              }
+              if (existing.draft.enabled === submitted.enabled) {
+                existing.draft.enabled = serverEnabled;
+              }
+              existing.refreshError = null;
+              existing.confirmingSave = false;
+              existing.pendingSnapshot = null;
+            } else if (!this.isDirty(existing) && !existing.saving) {
               existing.persisted = {
                 enabled: serverEnabled,
                 perm: serverPerm,
@@ -548,6 +671,7 @@
                 enabled: serverEnabled,
                 ...serverFlags,
               };
+              existing.refreshError = null;
             }
             updated.push(existing);
           } else {
@@ -565,7 +689,9 @@
               },
               saving: false,
               confirmingSave: false,
+              pendingSnapshot: null,
               error: null,
+              refreshError: null,
               successMessage: null,
             });
           }
@@ -617,8 +743,9 @@
        * @param {object} client - Client model.
        */
       handleSaveClick(client) {
-        if (client.saving) return;
+        if (this.isMutating || client.saving) return;
         if (this.willDisconnectStreams(client)) {
+          client.pendingSnapshot = extractDraftSnapshot(client.draft);
           client.confirmingSave = true;
         } else {
           this.saveClient(client);
@@ -631,8 +758,11 @@
        * @param {object} client - Client model.
        */
       confirmSave(client) {
+        if (this.isMutating || client.saving) return;
+        const snapshot = client.pendingSnapshot || extractDraftSnapshot(client.draft);
         client.confirmingSave = false;
-        this.saveClient(client);
+        client.pendingSnapshot = null;
+        this.saveClient(client, snapshot);
       },
 
       /**
@@ -641,7 +771,9 @@
        * @param {object} client - Client model.
        */
       cancelConfirm(client) {
+        if (this.isMutating || client.saving) return;
         client.confirmingSave = false;
+        client.pendingSnapshot = null;
       },
 
       /**
@@ -655,26 +787,33 @@
           ...client.persisted.flags,
         };
         client.confirmingSave = false;
+        client.pendingSnapshot = null;
         client.error = null;
+        client.refreshError = null;
       },
 
       /**
        * Commit draft changes to backend via POST /api/clients/update.
        *
        * @param {object} client - Client model.
+       * @param {object|null} [draftToSave=null] - Optional snapshot to submit instead of live draft.
        */
-      async saveClient(client) {
-        if (client.saving) return;
+      async saveClient(client, draftToSave = null) {
+        if (this.isMutating || client.saving) return;
 
         // Snapshot draft submitted at this exact moment
-        const submittedDraft = { ...client.draft };
+        const submittedDraft = draftToSave
+          ? extractDraftSnapshot(draftToSave)
+          : extractDraftSnapshot(client.draft);
         const outgoingEnabled = submittedDraft.enabled;
         const outgoingPerm = computeOutgoingPerm(client.persisted.perm, submittedDraft);
 
+        this.isMutating = true;
         client.saving = true;
         client.error = null;
         client.successMessage = null;
         client.confirmingSave = false;
+        client.pendingSnapshot = null;
 
         try {
           // Fetch fresh CSRF token
@@ -728,30 +867,42 @@
             throw new Error('Malformed server response');
           }
 
-          if (result && result.status === false) {
+          if (!result || result.status !== true) {
             throw new Error(result.error || this.i18n.t('pin.client_update_failed'));
           }
 
-          // Successfully persisted: update persisted baseline to what was submitted
-          client.persisted.enabled = outgoingEnabled;
-          client.persisted.perm = outgoingPerm;
-          client.persisted.flags = permToFlags(outgoingPerm);
-
+          // Confirmed save success
           client.successMessage = this.i18n.t('pin.client_updated_success');
+          client.error = null;
+          client.refreshError = null;
           setTimeout(() => {
             if (client.successMessage) {
               client.successMessage = null;
             }
           }, 4000);
 
-          await this.loadClients();
+          // Invalidate pre-mutation list responses
+          this.minValidClientsRequestId = ++this.clientsRequestId;
 
+          // Register pending reconciliation for this client
+          client._pendingReconcile = {
+            submittedDraft,
+            outgoingEnabled,
+            outgoingPerm,
+          };
+
+          // Reconcile baseline authoritatively from current GET while mutation guard is held
+          const loadResult = await this.loadClients();
+          if (!loadResult.success && !loadResult.superseded) {
+            client.refreshError = this.clientsError || this.i18n.t('pin.load_clients_failed');
+          }
         } catch (err) {
           console.error('Failed to update client', err);
           client.error = err.message || this.i18n.t('pin.client_update_failed');
-          // On failure, persisted is NOT updated, so draft remains dirty
         } finally {
+          delete client._pendingReconcile;
           client.saving = false;
+          this.isMutating = false;
         }
       },
 
@@ -761,7 +912,10 @@
        * @param {object} client - Client model.
        */
       async unpairClient(client) {
-        if (client.saving) return;
+        if (this.isMutating || client.saving) return;
+        client.confirmingSave = false;
+        client.pendingSnapshot = null;
+        this.isMutating = true;
         client.saving = true;
         client.error = null;
 
@@ -796,9 +950,15 @@
           }
 
           const result = await response.json();
-          if (result && result.status === false) {
+          if (!result || result.status !== true) {
             throw new Error(result.error || this.i18n.t('pin.unpair_failed'));
           }
+
+          // Invalidate pre-mutation list responses
+          this.minValidClientsRequestId = ++this.clientsRequestId;
+
+          // Remove the successfully unpaired client without discarding other client drafts
+          this.clients = this.clients.filter(c => c.uuid !== client.uuid);
 
           await this.loadClients();
         } catch (err) {
@@ -806,6 +966,7 @@
           client.error = err.message || this.i18n.t('pin.unpair_failed');
         } finally {
           client.saving = false;
+          this.isMutating = false;
         }
       },
     },
