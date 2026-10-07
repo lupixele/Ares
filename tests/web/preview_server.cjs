@@ -67,6 +67,22 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     return res.end(JSON.stringify({ status: true, named_certs: [] }))
   }
+  if (urlPath === '/api/pin' || urlPath === '/./api/pin') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ status: true, pairings: [] }))
+  }
+  if (urlPath === '/api/csrf-token' || urlPath === '/./api/csrf-token') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ status: true, csrf_token: 'fixture-csrf-token' }))
+  }
+  if (urlPath === '/api/clients/update' || urlPath === '/./api/clients/update') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ status: true }))
+  }
+  if (urlPath === '/api/clients/unpair' || urlPath === '/./api/clients/unpair') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    return res.end(JSON.stringify({ status: true }))
+  }
   if (urlPath === '/logout') {
     res.writeHead(200, { 'Content-Type': 'text/plain' })
     return res.end('OK')
