@@ -11,11 +11,15 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import fs from 'node:fs'
+
 const require = createRequire(import.meta.url)
 const { chromium } = require(process.env.PLAYWRIGHT_PACKAGE ?? 'playwright')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const output = path.join(root, 'cmake-build-ui-browser')
 await mkdir(output, { recursive: true })
+const defaultChrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+const chromePath = process.env.BROWSER_EXECUTABLE || (fs.existsSync(defaultChrome) ? defaultChrome : undefined)
 const server = spawn(process.execPath, [path.join(root, 'tests/web/preview_server.cjs')], {
   cwd: root, env: { ...process.env, PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'],
 })
@@ -34,14 +38,14 @@ try {
     server.once('error', (error) => { clearTimeout(timer); reject(error) })
     server.once('exit', (code) => { clearTimeout(timer); reject(new Error(`Fixture exited: ${code}`)) })
   })
-  browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}) })
+  browser = await chromium.launch({ headless: true, ...(chromePath ? { executablePath: chromePath } : {}) })
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const page = await context.newPage()
   page.on('pageerror', (error) => failures.push(error.message))
   page.on('console', (message) => {
     if (message.type() === 'error') failures.push(`Console error: ${message.text()}`)
   })
-  const release = { tag_name: 'v2026.929.125923', name: 'Fixture release', prerelease: false, body: '', assets: [] }
+  const release = { tag_name: 'v2026.929.125923', name: 'Fixture release', prerelease: false, body: 'Safe release notes <img src=x onerror=alert(1)>', assets: [] }
   const preRelease = { ...release, tag_name: 'v2026.1001.120000', name: 'Fixture prerelease', prerelease: true }
   const fixtures = new Map([
     ['/api/configLocale', { locale: 'en' }],
@@ -88,7 +92,21 @@ try {
   }))
   assert.equal(desktop.logoLoaded, true)
   assert.ok(desktop.scrollWidth <= desktop.viewport + 1, JSON.stringify(desktop))
+
+  // Validate Home overview container, cards, ecosystem quicklinks, and security
+  assert.equal(await page.locator('.ares-overview-container').count(), 1)
+  assert.equal(await page.locator('.ares-stat-card').count(), 3)
+  assert.equal(await page.locator('a[href="https://github.com/lupixele/Athena"]').count(), 1)
+  assert.equal(await page.locator('a[href="https://github.com/ClassicOldSong/moonlight-android"]').count(), 1)
+  assert.equal(await page.locator('a[href="https://moonlight-stream.org"]').count(), 1)
+  assert.equal(await page.locator('img[onerror]').count(), 0)
+  await page.screenshot({ path: path.join(output, 'home-overview-desktop.png') })
   await page.screenshot({ path: path.join(output, 'sidebar-desktop.png'), fullPage: true })
+  await page.setViewportSize({ width: 1728, height: 1080 })
+  const wide = await page.evaluate(() => ({ viewport: innerWidth, scrollWidth: document.documentElement.scrollWidth }))
+  assert.ok(wide.scrollWidth <= wide.viewport + 1)
+  await page.screenshot({ path: path.join(output, 'home-overview-wide.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 900 })
 
   await page.locator('.ares-sidebar__collapse-btn').click()
   assert.equal(await page.evaluate(() => localStorage.getItem('ares-sidebar-collapsed')), 'true')
@@ -118,7 +136,28 @@ try {
   await page.locator('.ares-sidebar').waitFor({ state: 'detached' })
   assert.equal(await page.evaluate(() => document.body.classList.contains('has-ares-sidebar')), false)
   assert.deepEqual(failures, [])
-  await writeFile(path.join(output, 'results.json'), JSON.stringify({ desktop, mobile, failures, observed, fixtureOnly: true }, null, 2))
+  // Fault states exercise the same built Home component, not a simplified page.
+  await page.setViewportSize({ width: 1440, height: 900 })
+  fixtures.set('/api/permissions', { permissions: [{ name: 'Input access', required: true, verifiable: true, status: 'denied' }] })
+  await context.route('**/api/logs', route => route.fulfill({ contentType: 'text/plain', body: '[2026-10-07 12:00:00.000]: Fatal: Fixture encoder failure' }))
+  await page.goto(origin)
+  await page.locator('a[href="/troubleshooting#permissions"]').waitFor()
+  await page.locator('a[href="/troubleshooting#logs"]').waitFor()
+  assert.ok(await page.locator('.ares-stat-card').nth(1).getByText('Unavailable', { exact: true }).isVisible())
+  await page.screenshot({ path: path.join(output, 'home-overview-attention.png'), fullPage: true })
+
+  const failuresBeforeConfigFault = failures.length
+  await context.route('**/api/config', route => route.fulfill({ status: 503, json: { status: false, error: 'Fixture offline' } }))
+  await page.goto(origin)
+  await page.locator('.ares-stat-card').first().getByText('Configuration offline').first().waitFor()
+  assert.ok(await page.getByRole('heading', { name: 'Hello, Ares!' }).isVisible())
+  await page.screenshot({ path: path.join(output, 'home-overview-offline.png'), fullPage: true })
+  // Chromium may log the deliberately injected HTTP 503; other console errors
+  // remain blocking. Unit tests separately assert parsed error state and cleanup.
+  const expectedStatusErrors = failures.splice(failuresBeforeConfigFault).filter(message => !message.includes('503'))
+  failures.push(...expectedStatusErrors)
+  assert.deepEqual(failures, [])
+  await writeFile(path.join(output, 'results.json'), JSON.stringify({ desktop, wide, mobile, failures, observed, fixtureOnly: true, faultStates: ['missing permissions', 'fatal logs', 'HTTP 503 config'] }, null, 2))
   console.log('SPA sidebar desktop/mobile fixture checks passed; no live backend acceptance claimed.')
 } finally {
   await browser?.close()

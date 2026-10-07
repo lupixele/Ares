@@ -37,7 +37,7 @@
                 {{ $t('index.config_offline') }}
               </span>
               <span v-else>
-                {{ version ? version.version : '—' }}
+                {{ versionDisplay }}
               </span>
             </div>
             <div class="ares-stat-card__sub">
@@ -48,10 +48,6 @@
               <span v-else-if="buildVersionIsDirty" class="badge bg-success-subtle text-success-emphasis">
                 <Package :size="12" class="icon me-1"></Package>
                 {{ $t('index.version_dirty') }}
-              </span>
-              <span v-else-if="installedVersionNotStable" class="badge bg-info-subtle text-info-emphasis">
-                <Info :size="12" class="icon me-1"></Info>
-                Pre-release
               </span>
               <span v-else class="badge bg-secondary-subtle text-secondary-emphasis">
                 {{ $t('index.ares_dev_build') }}
@@ -80,12 +76,18 @@
               <span v-else-if="!controllerEnabled" class="badge bg-secondary-subtle text-secondary-emphasis">
                 {{ $t('index.stat_controller_disabled') }}
               </span>
-              <span v-else-if="gamepadDriverDisplay" class="badge bg-primary-subtle text-primary-emphasis">
-                <Gamepad2 :size="12" class="icon me-1"></Gamepad2>
-                {{ gamepadDriverDisplay }}
+              <span v-else-if="driverStatusState === 'unavailable'" class="badge bg-danger-subtle text-danger-emphasis">
+                {{ $t('index.stat_driver_unavailable') }}
               </span>
-              <span v-else class="badge bg-success-subtle text-success-emphasis">
+              <span v-else-if="driverStatusState === 'unknown'" class="badge bg-secondary-subtle text-secondary-emphasis">
+                {{ $t('index.client_count_not_reported') }}
+              </span>
+              <span v-else-if="driverStatusState === 'ready'" class="badge bg-success-subtle text-success-emphasis">
+                <CheckCircle :size="12" class="icon me-1"></CheckCircle>
                 {{ $t('index.stat_driver_ready') }}
+              </span>
+              <span v-else class="badge bg-secondary-subtle text-secondary-emphasis">
+                {{ $t('index.stat_driver_unavailable') }}
               </span>
             </div>
           </div>
@@ -102,7 +104,8 @@
                 {{ $t('index.stat_pairing') }}
               </div>
               <div class="ares-stat-card__value">
-                <span v-if="pairedClientsCount !== null">{{ pairedClientsCount }} {{ $t('index.paired_clients') }}</span>
+                <span v-if="clientsError" class="text-muted fs-6">{{ $t('index.client_count_not_reported') }}</span>
+                <span v-else-if="pairedClientsCount !== null">{{ pairedClientsCount }} {{ $t('index.paired_clients') }}</span>
                 <span v-else>{{ $t('index.stat_pairing_action') }}</span>
               </div>
             </div>
@@ -182,6 +185,10 @@
           </RouterLink>
         </div>
         <div class="d-flex flex-wrap gap-2 mt-2">
+          <a class="btn btn-outline-primary btn-sm d-inline-flex align-items-center gap-1" href="https://github.com/lupixele/Athena" target="_blank" rel="noopener noreferrer">
+            <ExternalLink :size="14" class="icon"></ExternalLink>
+            {{ $t('index.athena_client') }}
+          </a>
           <a class="btn btn-outline-success btn-sm d-inline-flex align-items-center gap-1" href="https://github.com/ClassicOldSong/moonlight-android" target="_blank" rel="noopener noreferrer">
             <ExternalLink :size="14" class="icon"></ExternalLink>
             {{ $t('index.artemis_client') }}
@@ -216,23 +223,23 @@
         </div>
 
         <!-- Upstream Error / Unavailable State -->
-        <div v-else-if="githubError" class="alert alert-secondary my-3 small">
+        <div v-else-if="githubError || (!preReleaseVersion && !githubVersion)" class="alert alert-secondary my-3 small">
           <Info :size="16" class="icon me-1"></Info>
           {{ $t('index.upstream_baseline_unavailable') }}
         </div>
 
         <!-- Upstream Pre-release Available Alert -->
-        <div v-else-if="notifyPreReleases && preReleaseBuildAvailable" class="alert alert-warning my-3">
+        <div v-else-if="notifyPreReleases && preReleaseVersion" class="alert alert-warning my-3">
           <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
             <div class="d-flex align-items-center gap-2">
               <AlertCircle :size="18" class="icon text-warning"></AlertCircle>
               <div>
                 <strong>{{ $t('index.upstream_new_pre_release') }}</strong>
-                <span class="badge bg-warning-subtle text-warning-emphasis ms-2">{{ preReleaseVersion.release.name }}</span>
+                <span class="badge bg-warning-subtle text-warning-emphasis ms-2">{{ preReleaseVersion.release.name || preReleaseVersion.version }}</span>
               </div>
             </div>
             <a class="btn btn-sm btn-success flex-shrink-0 d-inline-flex align-items-center gap-1"
-               :href="preReleaseVersion.release.html_url" target="_blank" rel="noopener noreferrer">
+               :href="getSafeReleaseUrl(preReleaseVersion.release.html_url)" target="_blank" rel="noopener noreferrer">
               <Download :size="14" class="icon"></Download>
               {{ $t('index.upstream_download') }}
             </a>
@@ -240,23 +247,22 @@
           <div class="small text-muted mb-2">
             <em>{{ $t('index.upstream_note') }}</em>
           </div>
-          <div v-if="preReleaseVersion.release.body" class="p-2 border rounded bg-body-tertiary small markdown-body"
-               v-html="convertMarkdownToHtml(preReleaseVersion.release.body)">
-          </div>
+          <div v-if="preReleaseVersion.release.body" class="p-2 border rounded bg-body-tertiary small markdown-body font-monospace text-start"
+               style="white-space: pre-wrap;">{{ preReleaseVersion.release.body }}</div>
         </div>
 
-        <!-- Upstream Stable Available Alert -->
-        <div v-else-if="stableBuildAvailable" class="alert alert-warning my-3">
+        <!-- Upstream Latest Release Alert -->
+        <div v-else-if="githubVersion" class="alert alert-warning my-3">
           <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
             <div class="d-flex align-items-center gap-2">
               <AlertCircle :size="18" class="icon text-warning"></AlertCircle>
               <div>
                 <strong>{{ $t('index.upstream_new_stable') }}</strong>
-                <span class="badge bg-warning-subtle text-warning-emphasis ms-2">{{ githubVersion.release.name }}</span>
+                <span class="badge bg-warning-subtle text-warning-emphasis ms-2">{{ githubVersion.release.name || githubVersion.version }}</span>
               </div>
             </div>
             <a class="btn btn-sm btn-success flex-shrink-0 d-inline-flex align-items-center gap-1"
-               :href="githubVersion.release.html_url" target="_blank" rel="noopener noreferrer">
+               :href="getSafeReleaseUrl(githubVersion.release.html_url)" target="_blank" rel="noopener noreferrer">
               <Download :size="14" class="icon"></Download>
               {{ $t('index.upstream_download') }}
             </a>
@@ -264,30 +270,23 @@
           <div class="small text-muted mb-2">
             <em>{{ $t('index.upstream_note') }}</em>
           </div>
-          <div v-if="githubVersion.release.body" class="p-2 border rounded bg-body-tertiary small markdown-body"
-               v-html="convertMarkdownToHtml(githubVersion.release.body)">
-          </div>
-        </div>
-
-        <!-- Upstream Baseline Current -->
-        <div v-else class="alert alert-success my-3 small d-flex align-items-center gap-2">
-          <CheckCircle :size="16" class="icon text-success"></CheckCircle>
-          <span>{{ $t('index.upstream_baseline_current') }} ({{ githubVersion ? githubVersion.version : (version ? version.version : '') }})</span>
+          <div v-if="githubVersion.release.body" class="p-2 border rounded bg-body-tertiary small markdown-body font-monospace text-start"
+               style="white-space: pre-wrap;">{{ githubVersion.release.body }}</div>
         </div>
       </div>
     </div>
 
     <!-- Upstream Resources & Project Credits / License -->
-    <ResourceCard :installed-version-not-stable="installedVersionNotStable"></ResourceCard>
+    <ResourceCard :installed-version-not-stable="Boolean(buildVersionIsDirty)"></ResourceCard>
 
   </div>
 </template>
 
 <script>
-  import { marked } from 'marked'
   import Navbar from './Navbar.vue'
   import ResourceCard from './ResourceCard.vue'
   import SunshineVersion from './sunshine_version'
+  import { safeFetch } from './fetch_utils'
   import {
     AlertCircle,
     AlertTriangle,
@@ -328,6 +327,7 @@
     data() {
       return {
         version: null,
+        rawVersion: '',
         githubVersion: null,
         notifyPreReleases: false,
         preReleaseVersion: null,
@@ -337,14 +337,18 @@
         githubLoading: true,
         githubError: false,
         logs: null,
-        platform: "",
+        logsError: false,
+        platform: '',
         controllerEnabled: false,
         gamepadDriver: '',
         virtualhid: null,
         virtualhidLicense: null,
         vigembus: null,
         permissions: [],
+        permissionsError: false,
+        permissionsLoading: true,
         pairedClientsCount: null,
+        clientsError: false,
       }
     },
     computed: {
@@ -354,6 +358,41 @@
         if (this.platform === 'macos') return 'macOS'
         if (this.platform === 'linux') return 'Linux'
         return this.platform.charAt(0).toUpperCase() + this.platform.slice(1)
+      },
+      versionDisplay() {
+        return this.rawVersion || this.version?.version || '—'
+      },
+      driverStatusState() {
+        if (this.configLoading) return 'loading'
+        if (this.configError) return 'offline'
+        if (!this.controllerEnabled) return 'disabled'
+        if (this.permissionsLoading) return 'unknown'
+
+        if (this.fancyLogs.some(x => x.level === 'Fatal')) return 'unavailable'
+        if (this.missingPermissions.length > 0 || this.permissionsError) return 'unavailable'
+
+        if (this.platform === 'windows') {
+          if (!this.gamepadDriver || this.gamepadDriver === 'none') {
+            return 'unavailable'
+          }
+          if (this.gamepadDriver === 'virtualhid') {
+            const vhidOk = Boolean(this.virtualhid?.installed && this.virtualhid?.version_compatible)
+            const licOk = Boolean(this.virtualhidLicense?.licensed === true && this.virtualhidLicense?.service_available === true)
+            return (vhidOk && licOk) ? 'ready' : 'unavailable'
+          }
+          if (this.gamepadDriver === 'vigembus') {
+            const vigemOk = Boolean(this.vigembus?.installed && this.vigembus?.version_compatible)
+            return vigemOk ? 'ready' : 'unavailable'
+          }
+          return 'unknown'
+        }
+
+        if (this.platform === 'macos') {
+          if (!this.virtualhidLicense) return 'unknown'
+          return this.virtualhidLicense.licensed === true && this.virtualhidLicense.service_available === true ? 'ready' : 'unavailable'
+        }
+
+        return 'unknown'
       },
       gamepadDriverDisplay() {
         if (!this.controllerEnabled) return ''
@@ -417,26 +456,17 @@
         )
       },
       installedVersionNotStable() {
-        if (!this.githubVersion || !this.version) {
-          return false
-        }
-        return this.version.isGreater(this.githubVersion)
+        return Boolean(this.buildVersionIsDirty)
       },
       stableBuildAvailable() {
-        if (!this.githubVersion || !this.version) {
-          return false
-        }
-        return this.githubVersion.isGreater(this.version)
+        return false
       },
       preReleaseBuildAvailable() {
-        if (!this.preReleaseVersion || !this.githubVersion || !this.version) {
-          return false
-        }
-        return this.preReleaseVersion.isGreater(this.version) && this.preReleaseVersion.isGreater(this.githubVersion)
+        return false
       },
       buildVersionIsDirty() {
-        return this.version?.version?.split('.').length === 5 &&
-          this.version.version.includes('dirty')
+        const v = this.rawVersion || this.version?.version
+        return Boolean(v && v.split('.').length === 5 && v.includes('dirty'))
       },
       /** Parse the text errors, calculating the text, the timestamp and the level */
       fancyLogs() {
@@ -450,101 +480,167 @@
         return logLines
       },
     },
-    async created() {
-      console.log('Hello, Ares!')
-      try {
-        const config = await fetch('./api/config').then((r) => r.json())
-        this.notifyPreReleases = config.notify_pre_releases
-        this.platform = config.platform
-        this.controllerEnabled = config.controller !== 'disabled'
-        this.gamepadDriver = config.gamepad_driver || ''
-        this.version = new SunshineVersion(null, config.version)
-        console.log('Version: ', this.version.version)
-      } catch (e) {
-        console.error('Failed to fetch configuration:', e)
-        this.configError = true
-      } finally {
-        this.configLoading = false
-      }
+    created() {
+      this.abortController = new AbortController()
+      const signal = this.abortController.signal
 
-      if (!this.configError) {
-        try {
-          const response = await fetch('./api/permissions')
-          this.permissions = (await response.json()).permissions || []
-        } catch (e) {
-          console.error('Failed to fetch permission status:', e)
-        }
-
-        if (this.platform === 'windows' || this.platform === 'macos') {
-          try {
-            const virtualInputStatus = await fetch('./api/virtual-input/status').then((r) => r.json())
-            this.virtualhid = virtualInputStatus.virtualhid
-            if (this.platform === 'windows') {
-              this.vigembus = virtualInputStatus.vigembus
-            }
-          } catch (e) {
-            console.error('Failed to fetch virtual input driver status:', e)
-          }
-        }
-
-        if (this.platform === 'windows' || this.platform === 'macos') {
-          try {
-            this.virtualhidLicense = await fetch('./api/virtual-input/license').then((r) => r.json())
-          } catch (e) {
-            console.error('Failed to fetch Virtual HID Broker license status:', e)
-          }
-        }
-
-        try {
-          const clientsRes = await fetch('./api/clients/list')
-          if (clientsRes) {
-            const clientsData = await clientsRes.json()
-            if (clientsData && Array.isArray(clientsData.named_certs)) {
-              this.pairedClientsCount = clientsData.named_certs.length
-            }
-          }
-        } catch (e) {
-          // Client count optional
-        }
-      }
-
-      try {
-        this.logs = (await fetch('./api/logs').then(r => r.text()))
-      } catch (e) {
-        console.error('Failed to fetch logs:', e)
-      }
-
-      // Upstream Sunshine release check (isolated and independent)
-      try {
-        const latestRelease = await fetch('https://api.github.com/repos/LizardByte/Sunshine/releases/latest').then((r) => r.json())
-        if (latestRelease && latestRelease.tag_name) {
-          this.githubVersion = new SunshineVersion(latestRelease, null)
-          console.log('GitHub Version: ', this.githubVersion.version)
-        } else {
-          this.githubError = true
-        }
-      } catch (e) {
-        console.error('Failed to fetch upstream Sunshine latest release:', e)
-        this.githubError = true
-      }
-
-      try {
-        const releasesList = await fetch('https://api.github.com/repos/LizardByte/Sunshine/releases').then((r) => r.json())
-        if (Array.isArray(releasesList)) {
-          const prerelease = releasesList.find(release => release && release.prerelease)
-          if (prerelease && prerelease.tag_name) {
-            this.preReleaseVersion = new SunshineVersion(prerelease, null)
-            console.log('Pre-Release Version: ', this.preReleaseVersion.version)
-          }
-        }
-      } catch (e) {
-        console.error('Failed to fetch upstream Sunshine pre-releases:', e)
-      } finally {
-        this.githubLoading = false
-        this.loading = false
+      this.fetchLocalData(signal)
+      this.fetchUpstreamData(signal)
+    },
+    unmounted() {
+      if (this.abortController) {
+        this.abortController.abort()
       }
     },
     methods: {
+      getSafeReleaseUrl(url) {
+        if (typeof url !== 'string' || !url.trim()) {
+          return 'https://github.com/LizardByte/Sunshine/releases'
+        }
+        try {
+          const parsed = new URL(url)
+          if (parsed.protocol === 'https:' && parsed.hostname === 'github.com' && parsed.pathname.startsWith('/LizardByte/Sunshine/releases')) {
+            return url
+          }
+        } catch (e) {
+          // invalid URL
+        }
+        return 'https://github.com/LizardByte/Sunshine/releases'
+      },
+      async fetchLocalData(signal) {
+        console.log('Hello, Ares!')
+        try {
+          const configRes = await safeFetch('./api/config', {
+            signal, timeout: 5000,
+            validate: data => data && typeof data === 'object' && !Array.isArray(data) && data.status !== false && typeof data.platform === 'string' && data.platform.length > 0 && typeof data.version === 'string' && data.version.length > 0,
+          })
+          if (!configRes.ok || !configRes.data) {
+            this.configError = true
+            this.configLoading = false
+            this.clientsError = true
+            return
+          }
+          const config = configRes.data
+          this.notifyPreReleases = Boolean(config.notify_pre_releases)
+          this.platform = config.platform || ''
+          this.controllerEnabled = config.controller !== 'disabled'
+          this.gamepadDriver = config.gamepad_driver || ''
+          this.rawVersion = typeof config.version === 'string' ? config.version : ''
+          try {
+            this.version = this.rawVersion ? new SunshineVersion(null, this.rawVersion) : null
+          } catch (e) {
+            this.version = null
+          }
+          console.log('Version: ', this.rawVersion)
+          this.configLoading = false
+        } catch (e) {
+          console.error('Failed to fetch configuration:', e)
+          this.configError = true
+          this.configLoading = false
+          this.clientsError = true
+          return
+        }
+
+        // Diagnostic queries based on config: independent and parallel
+        safeFetch('./api/logs', { type: 'text', signal, timeout: 5000 }).then(res => {
+          if (res.ok) {
+            this.logs = res.data
+          }
+        })
+
+        if (!this.configError) {
+          safeFetch('./api/permissions', { signal, timeout: 5000, validate: data => Array.isArray(data?.permissions) }).then(res => {
+            this.permissionsLoading = false
+            if (res.ok && res.data) {
+              this.permissions = res.data.permissions || []
+            } else {
+              this.permissionsError = true
+            }
+          }).catch(() => {
+            this.permissionsLoading = false
+            this.permissionsError = true
+          })
+
+          if (this.platform === 'windows' || this.platform === 'macos') {
+            safeFetch('./api/virtual-input/status', { signal, timeout: 5000 }).then(res => {
+              if (res.ok && res.data) {
+                this.virtualhid = res.data.virtualhid || null
+                if (this.platform === 'windows') {
+                  this.vigembus = res.data.vigembus || null
+                }
+              }
+            })
+
+            safeFetch('./api/virtual-input/license', { signal, timeout: 5000, validate: data => typeof data?.licensed === 'boolean' && typeof data?.service_available === 'boolean' }).then(res => {
+              if (res.ok && res.data) {
+                this.virtualhidLicense = res.data
+              }
+            })
+          }
+
+          safeFetch('./api/clients/list', { signal, timeout: 5000 }).then(res => {
+            if (res.ok && res.data?.status !== false && Array.isArray(res.data?.named_certs)) {
+              this.pairedClientsCount = res.data.named_certs.length
+              this.clientsError = false
+            } else {
+              this.clientsError = true
+            }
+          }).catch(() => {
+            this.clientsError = true
+          })
+        }
+      },
+      async fetchUpstreamData(signal) {
+        this.githubLoading = true
+        this.githubError = false
+        try {
+          const latestPromise = safeFetch('https://api.github.com/repos/LizardByte/Sunshine/releases/latest', {
+            signal,
+            timeout: 5000,
+            validate: data => data && typeof data.tag_name === 'string' && !data.message,
+          })
+          const releasesPromise = safeFetch('https://api.github.com/repos/LizardByte/Sunshine/releases', {
+            signal,
+            timeout: 5000,
+            validate: data => Array.isArray(data),
+          })
+
+          const [latestRes, releasesRes] = await Promise.allSettled([latestPromise, releasesPromise])
+          let foundAny = false
+
+          if (latestRes.status === 'fulfilled' && latestRes.value.ok && latestRes.value.data) {
+            try {
+              this.githubVersion = new SunshineVersion(latestRes.value.data, null)
+              console.log('GitHub Version: ', this.githubVersion.version)
+              foundAny = true
+            } catch (e) {
+              this.githubVersion = null
+            }
+          }
+
+          if (releasesRes.status === 'fulfilled' && releasesRes.value.ok && Array.isArray(releasesRes.value.data)) {
+            const preRelease = releasesRes.value.data.find(r => r && r.prerelease && typeof r.tag_name === 'string')
+            if (preRelease) {
+              try {
+                this.preReleaseVersion = new SunshineVersion(preRelease, null)
+                console.log('Pre-Release Version: ', this.preReleaseVersion.version)
+                foundAny = true
+              } catch (e) {
+                this.preReleaseVersion = null
+              }
+            }
+          }
+
+          if (!foundAny) {
+            this.githubError = true
+          }
+        } catch (e) {
+          this.githubError = true
+        } finally {
+          this.githubLoading = false
+          this.loading = false
+        }
+      },
       /**
        * Build the macOS broker notice, prioritizing license and service warnings.
        *
@@ -627,10 +723,6 @@
           return this.buildVirtualInputNotice(false, 'index.virtualhid_development_title', [{ key: 'index.virtualhid_development_desc' }])
         }
         return null
-      },
-      convertMarkdownToHtml(markdown) {
-        if (!markdown) return ''
-        return marked.parse(markdown)
       },
     },
   }
