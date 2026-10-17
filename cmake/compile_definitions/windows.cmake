@@ -46,6 +46,8 @@ file(GLOB NVPREFS_FILES CONFIGURE_DEPENDS
 
 # vigem
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include")
+# Vendored SudoVDA driver IOCTL contract
+include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/sudovda")
 
 # sunshine icon
 if(NOT DEFINED SUNSHINE_ICON_PATH)
@@ -77,6 +79,9 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/session_driver_boundary.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/session_driver_boundary.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/sudovda_driver.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/sudovda_driver.cpp"
+        "${CMAKE_SOURCE_DIR}/third-party/sudovda/sudovda-ioctl.h"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/src/ViGEmClient.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Client.h"
         "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include/ViGEm/Common.h"
@@ -108,4 +113,7 @@ list(PREPEND PLATFORM_LIBRARIES
         userenv
         ws2_32
         wsock32
+        # SudoVDA virtual display driver client
+        cfgmgr32
+        ole32
 )
