@@ -133,5 +133,29 @@ namespace {
     EXPECT_NO_THROW(driver.close());
     EXPECT_FALSE(driver.handle_open());
   }
+
+  TEST_F(SudovdaDriverTest, OpensInstalledDriverWhenPresent) {
+    // This is the only case that talks to real hardware. It is skipped when the
+    // operator has no virtual display driver installed, and it performs no
+    // allocation: it only proves the handle opens and the protocol is accepted.
+    const auto status = driver.open();
+
+    if (status == platf::windows::sudovda_open_status_e::device_not_found) {
+      GTEST_SKIP() << "No SudoVDA control device present; driver-present path not exercised";
+    }
+
+    EXPECT_EQ(status, platf::windows::sudovda_open_status_e::ok);
+    EXPECT_TRUE(driver.is_driver_ready());
+    EXPECT_TRUE(driver.handle_open());
+
+    // A driver that answered the version probe must also answer a watchdog ping,
+    // otherwise the watchdog path is broken; either result is a real defect.
+    EXPECT_TRUE(driver.ping_watchdog());
+
+    // Closing must release the handle without releasing displays.
+    driver.close();
+    EXPECT_FALSE(driver.handle_open());
+    EXPECT_FALSE(driver.is_driver_ready());
+  }
 }  // namespace
 #endif  // _WIN32
