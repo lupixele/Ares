@@ -141,6 +141,16 @@ namespace config {
     std::string output_name;  ///< Display output name selected in configuration.
 
     /**
+     * @brief Create a session-scoped virtual display for each stream.
+     *
+     * @note Windows only, and defaults to off so existing installs keep streaming to the
+     *       physical desktop unchanged. When enabled, a display is allocated for the session
+     *       and removed when it ends; when the virtual display cannot be created, streaming
+     *       continues on the existing display rather than failing.
+     */
+    bool virtual_display;
+
+    /**
      * @brief Display-device integration settings.
      */
     struct dd_t {

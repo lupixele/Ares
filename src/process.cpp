@@ -38,6 +38,9 @@
 
   // _SH constants for _wfsopen()
   #include <share.h>
+
+  // Session-scoped virtual display lifecycle
+  #include "platform/windows/virtual_display_session.h"
 #endif
 
 namespace proc {
@@ -297,6 +300,12 @@ namespace proc {
       }
     }
 
+#ifdef _WIN32
+    // The virtual display must exist before the app starts so it is captured from the first frame.
+    // A failure here is reported by the seam and never fails the launch.
+    platf::windows::session_virtual_display_begin(config::video, *launch_session);
+#endif
+
     _app_launch_time = std::chrono::steady_clock::now();
 
     fg.disable();
@@ -340,6 +349,13 @@ namespace proc {
   }
 
   void proc_t::terminate() {
+#ifdef _WIN32
+    // Released first so a display is never left after its session ends. Idempotent, so this is
+    // correct whether or not one was allocated, and whether terminate runs from the initial
+    // "clean slate" call in execute() or from a genuine teardown.
+    platf::windows::session_virtual_display_end();
+#endif
+
     input::terminate_gamepads();
     std::error_code ec;
     placebo = false;

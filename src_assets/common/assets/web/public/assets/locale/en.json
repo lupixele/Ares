@@ -287,6 +287,8 @@
     "high_resolution_scrolling_desc": "When enabled, Sunshine will pass through high resolution scroll events from Moonlight clients. This can be useful to disable for older applications that scroll too fast with high resolution scroll events.",
     "install_steam_audio_drivers": "Install Steam Audio Drivers",
     "install_steam_audio_drivers_desc": "If Steam is installed, this will automatically install the Steam Streaming Speakers driver to support 5.1/7.1 surround sound and muting host audio.",
+    "virtual_display": "Create a Virtual Display per Session",
+    "virtual_display_desc": "When enabled, a session-scoped virtual display is created for each stream and removed when the stream ends. This uses the installed virtual display driver and changes no driver files. If no virtual display can be created, streaming continues on your existing display. When disabled, Sunshine streams your physical desktop as before.",
     "key_repeat_delay": "Key Repeat Delay",
     "key_repeat_delay_desc": "Control how fast keys will repeat themselves. The initial delay in milliseconds before repeating keys.",
     "key_repeat_frequency": "Key Repeat Frequency",

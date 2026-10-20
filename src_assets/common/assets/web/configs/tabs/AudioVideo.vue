@@ -80,6 +80,18 @@ const config = ref(props.config)
         :config="config"
     />
 
+    <PlatformLayout :platform="platform">
+      <template #windows>
+        <!-- Virtual Display -->
+        <Checkbox class="mb-3"
+                  id="virtual_display"
+                  locale-prefix="config"
+                  v-model="config.virtual_display"
+                  default="false"
+        ></Checkbox>
+      </template>
+    </PlatformLayout>
+
     <DisplayOutputSelector
       :platform="platform"
       :config="config"

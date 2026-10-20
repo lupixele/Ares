@@ -1106,6 +1106,33 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
     </tr>
 </table>
 
+### virtual_display
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            When enabled, a session-scoped virtual display is created for each stream and removed when the stream ends.
+            The display is created using the virtual display driver already installed on the host; no driver files are
+            installed, signed or modified by Sunshine.
+            When a virtual display cannot be created, for example because no driver is installed or the request was
+            refused, streaming continues on the existing display instead of failing.
+            @note{Applies to Windows only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}disabled@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            virtual_display = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+
 ### dd_configuration_option
 
 <table>
