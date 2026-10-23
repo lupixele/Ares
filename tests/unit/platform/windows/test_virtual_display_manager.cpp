@@ -12,6 +12,7 @@
 #include "src/platform/windows/virtual_display_manager.h"
 
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -279,6 +280,62 @@ namespace {
     EXPECT_LE(backend->allocated[0].height, 4320u);
     EXPECT_EQ(backend->allocated[0].width % 2u, 0u);
     EXPECT_EQ(backend->allocated[0].height % 2u, 0u);
+  }
+
+  TEST_F(VirtualDisplayManagerTest, WatchdogRunsWhileADisplayIsHeld) {
+    // The driver can remove a display whose watchdog is not pinged, so the loop must run while
+    // any session holds a display and stop when the last one is released.
+    auto heartbeat = std::make_shared<platf::windows::session_heartbeat_t>([] { return true; },
+                                                                          std::chrono::milliseconds(5));
+    auto boundary = std::make_shared<session_driver_boundary_t>(authorizer, backend, 3);
+    virtual_display_manager_t manager(boundary, nullptr, heartbeat);
+
+    EXPECT_FALSE(manager.heartbeat_running());
+
+    EXPECT_EQ(manager.acquire("session-a", 1280, 720, 60, 0), virtual_display_result_e::created);
+    EXPECT_TRUE(manager.heartbeat_running());
+
+    // A second session shares the one loop rather than starting another.
+    EXPECT_EQ(manager.acquire("session-b", 1920, 1080, 60, 0), virtual_display_result_e::created);
+    EXPECT_TRUE(manager.heartbeat_running());
+
+    // Releasing one of two must leave the loop running.
+    EXPECT_TRUE(manager.release("session-a").released);
+    EXPECT_TRUE(manager.heartbeat_running());
+
+    // Releasing the last must stop it.
+    EXPECT_TRUE(manager.release("session-b").released);
+    EXPECT_FALSE(manager.heartbeat_running());
+  }
+
+  TEST_F(VirtualDisplayManagerTest, ReacquireAfterReleaseRestartsTheWatchdog) {
+    auto heartbeat = std::make_shared<platf::windows::session_heartbeat_t>([] { return true; },
+                                                                          std::chrono::milliseconds(5));
+    auto boundary = std::make_shared<session_driver_boundary_t>(authorizer, backend, 3);
+    virtual_display_manager_t manager(boundary, nullptr, heartbeat);
+
+    EXPECT_EQ(manager.acquire("session-a", 1280, 720, 60, 0), virtual_display_result_e::created);
+    EXPECT_TRUE(manager.heartbeat_running());
+
+    EXPECT_TRUE(manager.release("session-a").released);
+    EXPECT_FALSE(manager.heartbeat_running());
+
+    EXPECT_EQ(manager.acquire("session-a", 1280, 720, 60, 0), virtual_display_result_e::created);
+    EXPECT_TRUE(manager.heartbeat_running());
+
+    EXPECT_TRUE(manager.release("session-a").released);
+    EXPECT_FALSE(manager.heartbeat_running());
+  }
+
+  TEST_F(VirtualDisplayManagerTest, FailedAllocationDoesNotStartTheWatchdog) {
+    backend->accept_allocations.store(false);
+    auto heartbeat = std::make_shared<platf::windows::session_heartbeat_t>([] { return true; },
+                                                                          std::chrono::milliseconds(5));
+    auto boundary = std::make_shared<session_driver_boundary_t>(authorizer, backend, 3);
+    virtual_display_manager_t manager(boundary, nullptr, heartbeat);
+
+    EXPECT_EQ(manager.acquire("session-a", 1280, 720, 60, 0), virtual_display_result_e::unavailable);
+    EXPECT_FALSE(manager.heartbeat_running());
   }
 }  // namespace
 #endif  // _WIN32

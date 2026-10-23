@@ -36,6 +36,7 @@
 
 // local includes
 #include "src/platform/windows/session_driver_boundary.h"
+#include "src/platform/windows/session_heartbeat.h"
 #include "src/platform/windows/sudovda_driver.h"
 #include "src/platform/windows/virtual_display_geometry.h"
 
@@ -61,6 +62,10 @@ namespace platf::windows {
 
   /**
    * @brief Session-scoped virtual display manager.
+   *
+   * @note The manager owns one watchdog keep-alive for the process. It runs while any session holds
+   *       a display and stops when the last one is released, so a long stream cannot lose its
+   *       display to an un-pinged driver watchdog.
    */
   class virtual_display_manager_t {
   public:
@@ -102,6 +107,17 @@ namespace platf::windows {
 
     virtual_display_manager_t(std::shared_ptr<session_driver_boundary_t> boundary,
                               std::shared_ptr<isession_policy_t> policy = nullptr);
+
+    /**
+     * @brief Construct a manager with an explicit heartbeat, for tests.
+     *
+     * @param boundary Driver boundary used to allocate and release displays.
+     * @param policy Session policy deciding which sessions may hold a display.
+     * @param heartbeat Keep-alive loop; may be substituted to observe ping scheduling.
+     */
+    virtual_display_manager_t(std::shared_ptr<session_driver_boundary_t> boundary,
+                              std::shared_ptr<isession_policy_t> policy,
+                              std::shared_ptr<session_heartbeat_t> heartbeat);
 
     /**
      * @brief Request a virtual display for a session.
@@ -147,6 +163,12 @@ namespace platf::windows {
     [[nodiscard]] bool has_display(const std::string &session_id) const;
 
     /**
+     * @brief Whether the watchdog keep-alive is currently running.
+     * @return True while at least one session holds a display and the loop is pinging.
+     */
+    [[nodiscard]] bool heartbeat_running() const;
+
+    /**
      * @brief Snapshot of every active session display.
      * @return Copy of the current bookkeeping.
      */
@@ -161,6 +183,11 @@ namespace platf::windows {
      * @brief Session policy; never null after construction.
      */
     std::shared_ptr<isession_policy_t> _policy;
+
+    /**
+     * @brief Watchdog keep-alive; never null after construction.
+     */
+    std::shared_ptr<session_heartbeat_t> _heartbeat;
 
     mutable std::mutex _mutex;                ///< Guards _sessions.
     std::map<std::string, virtual_display_session_t> _sessions;  ///< Active session displays.

@@ -7,19 +7,49 @@
 
 // standard includes
 #include <algorithm>
+#include <chrono>
+#include <string>
 #include <string_view>
+#include <utility>
 
 // local includes
 #include "src/logging.h"
+#include "src/platform/windows/session_heartbeat.h"
 #include "src/platform/windows/virtual_display_manager.h"
 
 namespace platf::windows {
   using namespace std::literals;
 
+  namespace {
+    /**
+     * @brief Build the keep-alive that pings through the supplied boundary.
+     * @param boundary Boundary whose watchdog the loop keeps alive.
+     * @return A heartbeat sharing the boundary's lifecycle, or null when there is no boundary.
+     */
+    std::shared_ptr<session_heartbeat_t> make_heartbeat(const std::shared_ptr<session_driver_boundary_t> &boundary) {
+      if (!boundary) {
+        return nullptr;
+      }
+      // The interval is coarse on purpose: a driver that reports no watchdog needs a modest
+      // default, and the boundary already counts consecutive failures its own way.
+      return std::make_shared<session_heartbeat_t>(
+        [boundary] { return boundary->tick_heartbeat(); },
+        HEARTBEAT_DEFAULT_INTERVAL);
+    }
+  }  // namespace
+
   virtual_display_manager_t::virtual_display_manager_t(std::shared_ptr<session_driver_boundary_t> boundary,
                                                        std::shared_ptr<isession_policy_t> policy) :
+      virtual_display_manager_t(std::move(boundary),
+                                 std::move(policy),
+                                 nullptr) {}
+
+  virtual_display_manager_t::virtual_display_manager_t(std::shared_ptr<session_driver_boundary_t> boundary,
+                                                       std::shared_ptr<isession_policy_t> policy,
+                                                       std::shared_ptr<session_heartbeat_t> heartbeat) :
       _boundary(std::move(boundary)),
-      _policy(policy ? std::move(policy) : std::make_shared<allow_all_policy_t>()) {}
+      _policy(policy ? std::move(policy) : std::make_shared<allow_all_policy_t>()),
+      _heartbeat(heartbeat ? std::move(heartbeat) : make_heartbeat(_boundary)) {}
 
   virtual_display_result_e virtual_display_manager_t::acquire(const std::string &session_id,
                                                              int client_width,
@@ -71,6 +101,11 @@ namespace platf::windows {
     {
       std::lock_guard lock(_mutex);
       _sessions[session_id] = std::move(record);
+      // The watchdog must run from the moment the first display exists. Starting an already
+      // running loop is a no-op, so concurrent acquisitions cannot spawn a second worker.
+      if (_heartbeat) {
+        _heartbeat->start();
+      }
     }
 
     BOOST_LOG(info) << "Virtual display ["sv << allocation->display_name << "] allocated for session ["
@@ -106,9 +141,17 @@ namespace platf::windows {
       }
     }
 
+    // Stop the watchdog only when no session still holds a display. Doing it outside _mutex keeps
+    // the join off the lock, and doing it last means a later re-acquire restarts it cleanly.
+    bool stop_heartbeat = false;
     if (released) {
       std::lock_guard lock(_mutex);
       _sessions.erase(session_id);
+      stop_heartbeat = _sessions.empty();
+    }
+
+    if (stop_heartbeat && _heartbeat) {
+      _heartbeat->stop();
     }
 
     report.released = released;
@@ -146,6 +189,13 @@ namespace platf::windows {
   bool virtual_display_manager_t::has_display(const std::string &session_id) const {
     std::lock_guard lock(_mutex);
     return _sessions.count(session_id) != 0;
+  }
+
+  bool virtual_display_manager_t::heartbeat_running() const {
+    if (!_heartbeat) {
+      return false;
+    }
+    return _heartbeat->running();
   }
 
   std::vector<virtual_display_session_t> virtual_display_manager_t::active_sessions() const {
