@@ -42,14 +42,17 @@ namespace platf::windows {
                                                        std::shared_ptr<isession_policy_t> policy) :
       virtual_display_manager_t(std::move(boundary),
                                  std::move(policy),
+                                 nullptr,
                                  nullptr) {}
 
   virtual_display_manager_t::virtual_display_manager_t(std::shared_ptr<session_driver_boundary_t> boundary,
                                                        std::shared_ptr<isession_policy_t> policy,
-                                                       std::shared_ptr<session_heartbeat_t> heartbeat) :
+                                                       std::shared_ptr<session_heartbeat_t> heartbeat,
+                                                       std::shared_ptr<idisplay_target_t> target) :
       _boundary(std::move(boundary)),
       _policy(policy ? std::move(policy) : std::make_shared<allow_all_policy_t>()),
-      _heartbeat(heartbeat ? std::move(heartbeat) : make_heartbeat(_boundary)) {}
+      _heartbeat(heartbeat ? std::move(heartbeat) : make_heartbeat(_boundary)),
+      _target(std::move(target)) {}
 
   virtual_display_result_e virtual_display_manager_t::acquire(const std::string &session_id,
                                                              int client_width,
@@ -111,6 +114,23 @@ namespace platf::windows {
     BOOST_LOG(info) << "Virtual display ["sv << allocation->display_name << "] allocated for session ["
                     << session_id << "] at "sv << geometry.width << 'x' << geometry.height << '@'
                     << geometry.fps;
+
+    // Activation is the difference between a monitor that exists and a monitor that is used:
+    // until the session is switched to it, the application opens on the operator's display and
+    // the client captures the wrong screen. A failure here must not fail the session.
+    if (_target) {
+      try {
+        if (_target->apply(allocation->display_name, geometry) != display_target_result_e::requested) {
+          BOOST_LOG(warning) << "Session ["sv << session_id
+                             << "] could not be switched to its virtual display; capture will use the existing display"sv;
+        }
+      } catch (...) {
+        // The seam reports failures rather than throwing, but a session must never be lost to a
+        // display convenience: a virtual display that cannot be activated is a degraded session.
+        BOOST_LOG(warning) << "Activating the virtual display for session ["sv << session_id << "] threw; continuing"sv;
+      }
+    }
+
     return virtual_display_result_e::created;
   }
 
@@ -119,6 +139,7 @@ namespace platf::windows {
     report.session_id = session_id;
 
     std::optional<std::wstring> display_name;
+    bool last_display = false;
     {
       std::lock_guard lock(_mutex);
       const auto it = _sessions.find(session_id);
@@ -129,6 +150,25 @@ namespace platf::windows {
         return report;
       }
       display_name = it->second.display_name;
+      last_display = _sessions.size() == 1;
+    }
+
+    // Restore the operator's display layout while the virtual display is still present: the
+    // layout that is put back does not reference it, but the operating system is much happier
+    // moving from one valid layout to another than discovering that a display vanished. Only the
+    // last session restores, because restoring while another session still holds a display would
+    // deactivate that session's display mid-stream.
+    if (last_display && _target) {
+      try {
+        if (!_target->restore()) {
+          BOOST_LOG(warning) << "The display layout before session ["sv << session_id
+                             << "] could not be restored; it will be left as it is"sv;
+        }
+      } catch (...) {
+        // Losing the restore is recoverable (Windows falls back to the connected displays when a
+        // display is removed); losing the session is not.
+        BOOST_LOG(warning) << "Restoring the display layout for session ["sv << session_id << "] threw; continuing"sv;
+      }
     }
 
     bool released = false;

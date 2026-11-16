@@ -39,6 +39,7 @@
 #include "src/platform/windows/session_heartbeat.h"
 #include "src/platform/windows/sudovda_driver.h"
 #include "src/platform/windows/virtual_display_geometry.h"
+#include "src/platform/windows/virtual_display_target.h"
 
 namespace platf::windows {
   /**
@@ -66,6 +67,11 @@ namespace platf::windows {
    * @note The manager owns one watchdog keep-alive for the process. It runs while any session holds
    *       a display and stops when the last one is released, so a long stream cannot lose its
    *       display to an un-pinged driver watchdog.
+   *
+   * @note When a display target is supplied, the manager also makes a new display the display the
+   *       session actually uses, and puts the previous layout back when the last session ends.
+   *       Without a target the manager only owns the display lifecycle, which is what tests want:
+   *       nothing in a unit test should be able to rearrange the display layout of the host.
    */
   class virtual_display_manager_t {
   public:
@@ -109,15 +115,18 @@ namespace platf::windows {
                               std::shared_ptr<isession_policy_t> policy = nullptr);
 
     /**
-     * @brief Construct a manager with an explicit heartbeat, for tests.
+     * @brief Construct a manager with an explicit heartbeat and display target, for tests.
      *
      * @param boundary Driver boundary used to allocate and release displays.
      * @param policy Session policy deciding which sessions may hold a display.
      * @param heartbeat Keep-alive loop; may be substituted to observe ping scheduling.
+     * @param target Display activation seam; may be substituted to observe switching without
+     *                changing the operator's display layout.
      */
     virtual_display_manager_t(std::shared_ptr<session_driver_boundary_t> boundary,
                               std::shared_ptr<isession_policy_t> policy,
-                              std::shared_ptr<session_heartbeat_t> heartbeat);
+                              std::shared_ptr<session_heartbeat_t> heartbeat,
+                              std::shared_ptr<idisplay_target_t> target = nullptr);
 
     /**
      * @brief Request a virtual display for a session.
@@ -188,6 +197,11 @@ namespace platf::windows {
      * @brief Watchdog keep-alive; never null after construction.
      */
     std::shared_ptr<session_heartbeat_t> _heartbeat;
+
+    /**
+     * @brief Session display activation seam; never null after construction.
+     */
+    std::shared_ptr<idisplay_target_t> _target;
 
     mutable std::mutex _mutex;                ///< Guards _sessions.
     std::map<std::string, virtual_display_session_t> _sessions;  ///< Active session displays.

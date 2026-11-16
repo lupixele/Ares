@@ -16,6 +16,7 @@
 #include "src/platform/windows/session_driver_boundary.h"
 #include "src/platform/windows/sudovda_driver.h"
 #include "src/platform/windows/virtual_display_session.h"
+#include "src/platform/windows/virtual_display_target.h"
 
 namespace platf::windows {
   using namespace std::literals;
@@ -73,11 +74,19 @@ namespace platf::windows {
     /**
      * @brief Process-global manager, lazily created against the process boundary.
      * @return Reference to the manager; never null.
+     *
+     * @note The display target is passed explicitly: the manager itself defaults to having none,
+     *       so a unit test never touches the real display layout by accident. Production is the
+     *       only place that opts into changing it.
      */
     virtual_display_manager_t &manager() {
       auto &s = state();
       if (!s.manager) {
-        s.manager = std::make_shared<virtual_display_manager_t>(s.boundary);
+        s.manager = std::make_shared<virtual_display_manager_t>(
+          s.boundary,
+          nullptr,
+          nullptr,
+          std::make_shared<display_topology_target_t>());
       }
       return *s.manager;
     }

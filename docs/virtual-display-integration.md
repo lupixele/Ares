@@ -15,19 +15,49 @@ existing install streams the physical desktop exactly as before the option exist
 ## What happens on a stream
 
 1. `proc_t::execute()` calls `platf::windows::session_virtual_display_begin()` just before the
-   application is launched, so the display exists before the first frame is captured.
+   application is launched, so the display exists — and is the display the desktop is using — before
+   the first frame is captured or the application looks for a monitor.
 2. The seam computes the requested resolution through `resolve_virtual_display_geometry`, which
    defaults unset values, applies client scaling, enforces even dimensions and a usable minimum, and
    clamps out-of-range refresh rates and oversized panels.
 3. `virtual_display_manager_t` asks the driver boundary for the display and records it against the
    session's client identity.
-4. A single watchdog keep-alive (`session_heartbeat_t`) starts when the first display is allocated and
+4. The manager then hands the display to its display target, which switches the desktop to it (see
+   below).
+5. A single watchdog keep-alive (`session_heartbeat_t`) starts when the first display is allocated and
    stops when the last one is released.
-5. `proc_t::terminate()` calls `session_virtual_display_end()`, releasing the display and stopping the
-   watchdog.
+6. `proc_t::terminate()` calls `session_virtual_display_end()`. The layout from before the session is
+   put back, then the display is released and the watchdog stopped.
 
 The seam is deliberately the only Windows-aware piece, so `process.cpp` stays portable and needs a
 single `#ifdef _WIN32` around two calls.
+
+## Pointing the session at the display
+
+Creating a display is not the same as using it. A monitor that has just been created is not where
+applications open, so without this step the application would still launch on the operator's monitor
+and the client would capture that same physical desktop while the new display stayed dark.
+
+The target (`virtual_display_target.h`) therefore makes the new display the **only active display**
+for the duration of the session. Isolation is the point rather than a side effect: Sunshine's capture
+enumeration only returns displays that are attached to the desktop, so an isolated session has exactly
+one capture candidate, and an application launched after the switch opens on the display the client is
+watching. The layout is applied with the mode the driver reports for the new monitor — it was created
+at the requested geometry — and a mismatch between the requested and reported size is logged rather
+than forced. A layout the operating system rejects is retried with adjustment allowed; if that is
+rejected too, it is logged and the session continues on the existing display.
+
+Both transitions are synchronous and owned here: the pre-session layout is captured before the switch
+and applied again before the display is removed. The project's display-device persistence layer is
+deliberately *not* used for this, because its revert is deferred by `dd_config_revert_delay` (three
+seconds by default) and would therefore run after the virtual display no longer exists, against a
+topology that still references it. Keeping the swap in memory also means this feature never touches
+the operator's persisted display-device state.
+
+One isolation is possible at a time: a second concurrent session cannot also be made the only active
+display, so the most recent session owns the desktop and a second client is not isolated. This matches
+the single-client streaming case the feature is for.
+
 
 ## Why the watchdog matters
 
@@ -47,8 +77,12 @@ clamped to a sane range, so two missed pings are tolerated before the driver act
 | Driver installed but incompatible | Handled at open time; the session proceeds without a virtual display. |
 | Requested display rejected | Returns `unavailable`; the session proceeds. |
 | Client requests an absurd size | Clamped to a normal panel, aspect preserved, before the driver sees it. |
+| New display not visible to the OS yet | Reported as `device_missing`; the session proceeds on the existing display. |
+| Operating system refuses the layout | Reported as `activation_failed`; the session proceeds on the existing display. |
+| Layout cannot be put back | Logged as a warning, and the display is still released, so nothing is leaked. |
 | Display cannot be removed | Retained and reported, never silently forgotten; retried on shutdown. |
 | Same session starts twice | The existing display is reused rather than a second one being created. |
+| Two sessions at once | Only one display can be isolated; the latest session owns the desktop. |
 | Watchdog stops answering | Failures counted and logged; the loop never crashes or hangs. |
 
 ## Testing
@@ -60,12 +94,16 @@ clamped to a sane range, so two missed pings are tolerated before the driver act
   policy; no driver involved.
 - `tests/unit/platform/windows/test_session_heartbeat.cpp` — 11 tests on the keep-alive: interval
   derivation, start/stop lifecycle, one-loop guarantees, failure counting, and a throwing callback.
-- `tests/unit/platform/windows/test_virtual_display_manager.cpp` — 19 tests on the lifecycle, using
+- `tests/unit/platform/windows/test_virtual_display_manager.cpp` — 18 tests on the lifecycle, using
   a recording backend so no real display is created or destroyed.
+- `tests/unit/platform/windows/test_virtual_display_target.cpp` — 14 tests: path selection as a pure
+  function, plus the activation and restore contract driven through the manager with a recording
+  target, so the display layout of the host running the tests is never changed.
 
-Parent-verified totals: **811 native tests passed, 5 pre-existing environmental skips, 0 failures**,
-plus **120 frontend tests** and a production Vite build. The watchdog additions are verified by a
-full parent re-run, recorded separately below.
+Current totals: **844 native tests, 835 passed, 9 environmental skips, 0 failures** (2026-11-16). The
+skips are a disabled system tray build, an unlicensed virtual HID broker, two GPU encoders that this
+host does not have, the mouse HID cases, and an external command test. The frontend was not touched by
+this slice; its last verified run was 120 tests plus a production Vite build.
 
 ## Verified on real hardware
 
@@ -81,5 +119,8 @@ the clamped or high-DPI resolution paths, GPU capture, or keyboard docking.
 ## Not verified
 
 - The touch-keyboard docking fix has not been observed on a real high-DPI virtual display.
+- Capture targeting has not been observed on real hardware: no test has yet confirmed that an
+  application launched after the switch opens on the virtual display, and the layout-restore path has
+  not been run against a real desktop with the installed driver.
 - The full streaming integration (`virtual_display` enabled, a real client attaching) has not been run.
 - No GPU binding checks, no install/packaging validation, no supported driver distribution.

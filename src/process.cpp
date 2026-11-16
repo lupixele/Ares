@@ -284,6 +284,13 @@ namespace proc {
       }
     }
 
+    // The virtual display must exist, and be the display the desktop is using, before anything is
+    // launched: that is what makes the application open on the screen the client captures.
+    // A failure here is reported by the seam and never fails the launch.
+#ifdef _WIN32
+    platf::windows::session_virtual_display_begin(config::video, *launch_session);
+#endif
+
     if (_app.cmd.empty()) {
       BOOST_LOG(info) << "Executing [Desktop]"sv;
       placebo = true;
@@ -299,12 +306,6 @@ namespace proc {
         return -1;
       }
     }
-
-#ifdef _WIN32
-    // The virtual display must exist before the app starts so it is captured from the first frame.
-    // A failure here is reported by the seam and never fails the launch.
-    platf::windows::session_virtual_display_begin(config::video, *launch_session);
-#endif
 
     _app_launch_time = std::chrono::steady_clock::now();
 
