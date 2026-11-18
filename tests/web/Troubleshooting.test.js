@@ -237,4 +237,13 @@ describe('virtual input troubleshooting', () => {
     expect(wrapper.findAll('.permission-table-shell tbody button')).toHaveLength(2)
     wrapper.unmount()
   })
+
+  it('renders the page header with its title and no description', async () => {
+    const wrapper = await mountTroubleshooting('windows', 'none')
+
+    expect(wrapper.find('.ares-troubleshooting__header').exists()).toBe(true)
+    expect(wrapper.get('.ares-troubleshooting__title').text()).toBe('troubleshooting.troubleshooting')
+    expect(wrapper.find('.ares-troubleshooting__desc').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })

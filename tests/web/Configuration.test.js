@@ -1,6 +1,7 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { mount, shallowMount, flushPromises } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import Config from '../../src_assets/common/assets/web/Config.vue'
 import DisplayDeviceOptions from '../../src_assets/common/assets/web/configs/tabs/audiovideo/DisplayDeviceOptions.vue'
 import General from '../../src_assets/common/assets/web/configs/tabs/General.vue'
 import Inputs from '../../src_assets/common/assets/web/configs/tabs/Inputs.vue'
@@ -190,5 +191,30 @@ describe('gamepad input configuration', () => {
       'auto', 'x360', 'ds4',
     ])
     expect(wrapper.get('#gamepad').element.value).toBe('auto')
+  })
+})
+
+describe('configuration page', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('renders the page header above the tab layout', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      json: async () => ({ platform: 'windows', status: 'ok', version: '2026.929.125923' }),
+    })))
+
+    const wrapper = shallowMount(Config, {
+      global: {
+        mocks: { $t: key => key },
+        stubs: { Navbar: true },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.ares-config__header').exists()).toBe(true)
+    expect(wrapper.get('.ares-config__title').text()).toBe('config.configuration')
+    expect(wrapper.get('.ares-config__desc').text()).toBe('config.configuration_desc')
+    wrapper.unmount()
   })
 })
