@@ -42,17 +42,40 @@ The target (`virtual_display_target.h`) therefore makes the new display the **on
 for the duration of the session. Isolation is the point rather than a side effect: Sunshine's capture
 enumeration only returns displays that are attached to the desktop, so an isolated session has exactly
 one capture candidate, and an application launched after the switch opens on the display the client is
-watching. The layout is applied with the mode the driver reports for the new monitor — it was created
-at the requested geometry — and a mismatch between the requested and reported size is logged rather
-than forced. A layout the operating system rejects is retried with adjustment allowed; if that is
-rejected too, it is logged and the session continues on the existing display.
+watching.
 
-Both transitions are synchronous and owned here: the pre-session layout is captured before the switch
-and applied again before the display is removed. The project's display-device persistence layer is
-deliberately *not* used for this, because its revert is deferred by `dd_config_revert_delay` (three
-seconds by default) and would therefore run after the virtual display no longer exists, against a
-topology that still references it. Keeping the swap in memory also means this feature never touches
-the operator's persisted display-device state.
+Switching happens in two steps, because a display that has never been used does not yet have the modes
+a single call would have to name:
+
+1. **Propose the layout.** The target submits one path — the virtual display, marked active, with every
+   mode index cleared — and no modes, so Windows builds the layout and assigns the source and target
+   modes itself. This is the step that works for a display the operating system has only just learned
+   about.
+2. **State the geometry.** The display is now active, so it has a source mode. The target reads the
+   layout back, sets that source mode to the requested size, states the requested refresh rate, and
+   clears the target index so Windows picks the target mode that matches the new resolution. The
+   exact mode is requested first; adjustment is only allowed after a rejection.
+
+A rejected layout is reported and the session continues on the existing display. If the switch succeeds
+but the geometry cannot be set, the session keeps the switch and streams at the mode Windows selected —
+a wrong size is a degraded session, while losing the display would be a broken one.
+
+The switch is verified rather than assumed. Windows is known to accept a topology that names one
+display and then activate a different, near-identical one, so after applying the layout the target
+reads it back and confirms, by adapter and target identifier, that the requested display is present and
+that no other display is still active. A switch that fails that check is rolled back and reported as a
+failed activation, which means the session falls back to the physical display instead of streaming a
+display the client cannot see.
+
+Both transitions are synchronous and owned here: the pre-session layout is captured, with its modes,
+before the switch and applied again before the display is removed. If Windows rejects the exact layout
+on restore, the topology alone is restored, so the operator's displays always come back even when their
+modes do not. The project's display-device persistence layer is deliberately *not* used for this,
+because its revert is deferred by `dd_config_revert_delay` (three seconds by default) and would
+therefore run after the virtual display no longer exists, against a topology that still references it.
+Keeping the swap in memory also means this feature never touches Sunshine's own persisted display
+state (`display_device.state`): the restore writes the operator's original layout back to the Windows
+display database, where it was already the saved configuration, so the two cannot drift apart.
 
 One isolation is possible at a time: a second concurrent session cannot also be made the only active
 display, so the most recent session owns the desktop and a second client is not isolated. This matches
@@ -79,6 +102,9 @@ clamped to a sane range, so two missed pings are tolerated before the driver act
 | Client requests an absurd size | Clamped to a normal panel, aspect preserved, before the driver sees it. |
 | New display not visible to the OS yet | Reported as `device_missing`; the session proceeds on the existing display. |
 | Operating system refuses the layout | Reported as `activation_failed`; the session proceeds on the existing display. |
+| A different display is activated instead | Detected by identity, rolled back, and reported as `activation_failed`; the session proceeds on the existing display. |
+| Layout accepted but the geometry rejected | The switch is kept and a warning is logged; the session streams at the mode Windows selected. |
+| Exact layout rejected on restore | The saved topology is restored without its modes, so the operator's displays come back. |
 | Layout cannot be put back | Logged as a warning, and the display is still released, so nothing is leaked. |
 | Display cannot be removed | Retained and reported, never silently forgotten; retried on shutdown. |
 | Same session starts twice | The existing display is reused rather than a second one being created. |
@@ -99,11 +125,16 @@ clamped to a sane range, so two missed pings are tolerated before the driver act
 - `tests/unit/platform/windows/test_virtual_display_target.cpp` — 14 tests: path selection as a pure
   function, plus the activation and restore contract driven through the manager with a recording
   target, so the display layout of the host running the tests is never changed.
+- `tests/unit/platform/windows/test_virtual_display_topology.cpp` — 20 tests on the data handed to
+  the operating system: what a proposed layout looks like, how geometry is stated on an active
+  display, how mode indexes (source, target and desktop image) are compacted and rewritten for a
+  restore, and how a display is identified and proved to be the only one in use. No display
+  configuration is read or written by these tests.
 
-Current totals: **844 native tests, 835 passed, 9 environmental skips, 0 failures** (2026-11-16). The
+Current totals: **864 native tests, 859 passed, 5 environmental skips, 0 failures** (2026-11-18). The
 skips are a disabled system tray build, an unlicensed virtual HID broker, two GPU encoders that this
-host does not have, the mouse HID cases, and an external command test. The frontend was not touched by
-this slice; its last verified run was 120 tests plus a production Vite build.
+host does not have, and an external command test. The frontend suite is at **124 tests plus a
+production Vite build**, both verified on the same day.
 
 ## Verified on real hardware
 

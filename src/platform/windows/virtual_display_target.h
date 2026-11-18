@@ -7,6 +7,10 @@
  * captures that same physical desktop - the virtual display stays dark. This module closes that
  * gap.
  *
+ * Activation is two calls, because a display that has never been used has no mode to name: the new
+ * display is first proposed as the whole layout, so that Windows assigns its modes, and the session
+ * geometry is stated once the display is active.
+ *
  * The session is prepared as an isolated display: the virtual display becomes the only active
  * display for the duration of the session, which is what makes a launched application appear on
  * the display the client is actually watching, and what makes the usual capture enumeration
@@ -113,9 +117,11 @@ namespace platf::windows {
   /**
    * @brief Target backed by the Win32 display configuration API.
    *
-   * @details Reads the layout before switching, applies an isolated single-display layout for the
-   *          virtual display, and re-applies the saved layout on restore. The whole object is
-   *          guarded by a mutex because session start and session end run on different threads.
+   * @details Reads the layout before switching, proposes the virtual display as the whole layout
+   *          so that Windows can assign its modes, confirms that the display really is the only
+   *          one active, then states the session geometry. Re-applies the saved layout on restore.
+   *          The whole object is guarded by a mutex because session start and session end run on
+   *          different threads.
    */
   class display_topology_target_t final: public idisplay_target_t {
   public:
@@ -137,6 +143,6 @@ namespace platf::windows {
 
     std::mutex _mutex;                              ///< Serializes session start and session end.
     std::unique_ptr<saved_topology_t> _saved;       ///< Layout to restore, or null when none is owed.
-    virtual_display_geometry_t _geometry;           ///< Geometry of the applied display, for restore diagnostics.
+    virtual_display_geometry_t _geometry;           ///< Requested geometry of the applied display, for diagnostics.
   };
 }  // namespace platf::windows
