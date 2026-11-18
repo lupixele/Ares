@@ -1,10 +1,12 @@
 <template>
   <Navbar></Navbar>
   <div id="content" class="container">
-    <div class="my-4">
-      <h1>{{ $t('apps.applications_title') }}<span v-if="apps.length"> ({{ appCountLabel }})</span></h1>
-      <p>{{ $t('apps.applications_desc') }}</p>
-    </div>
+    <header class="ares-apps__header my-4">
+      <h1 class="ares-apps__title">
+        {{ $t('apps.applications_title') }}<span v-if="apps.length"> ({{ appCountLabel }})</span>
+      </h1>
+      <p class="ares-apps__desc text-muted mb-0">{{ $t('apps.applications_desc') }}</p>
+    </header>
 
     <!-- Actions toolbar -->
     <div class="toolbar apps-toolbar d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -1057,3 +1059,21 @@
     },
   }
 </script>
+
+<style scoped>
+.ares-apps__header {
+  border-bottom: 1px solid var(--bs-border-color);
+  padding-bottom: 1rem;
+}
+
+.ares-apps__title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+
+.ares-apps__desc {
+  font-size: 0.95rem;
+  max-width: 70ch;
+}
+</style>

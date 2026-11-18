@@ -1,7 +1,9 @@
 <template>
   <Navbar></Navbar>
   <div id="content" class="container">
-    <h1 class="my-4">{{ $t('troubleshooting.troubleshooting') }}</h1>
+    <header class="ares-troubleshooting__header my-4">
+      <h1 class="ares-troubleshooting__title">{{ $t('troubleshooting.troubleshooting') }}</h1>
+    </header>
     <div class="card my-4" v-if="permissions.length || permissionError">
       <div class="card-body">
         <div class="d-flex align-items-center justify-content-between gap-3 flex-wrap mb-2">
@@ -1386,3 +1388,16 @@
       },
     }
   </script>
+
+  <style scoped>
+  .ares-troubleshooting__header {
+    border-bottom: 1px solid var(--bs-border-color);
+    padding-bottom: 1rem;
+  }
+
+  .ares-troubleshooting__title {
+    font-size: 1.75rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+  }
+  </style>

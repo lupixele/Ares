@@ -1,10 +1,10 @@
 <template>
   <Navbar></Navbar>
   <div id="content" class="container">
-    <div class="my-4">
-      <h1>{{ $t('config.configuration') }}</h1>
-      <p>{{ $t('config.configuration_desc') }}</p>
-    </div>
+    <header class="ares-config__header my-4">
+      <h1 class="ares-config__title">{{ $t('config.configuration') }}</h1>
+      <p class="ares-config__desc text-muted mb-0">{{ $t('config.configuration_desc') }}</p>
+    </header>
 
     <!-- Search Bar with Autocomplete -->
     <div class="toolbar mb-3 d-flex flex-wrap align-items-center gap-3">
@@ -492,3 +492,21 @@
     },
   }
 </script>
+
+<style scoped>
+.ares-config__header {
+  border-bottom: 1px solid var(--bs-border-color);
+  padding-bottom: 1rem;
+}
+
+.ares-config__title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+}
+
+.ares-config__desc {
+  font-size: 0.95rem;
+  max-width: 70ch;
+}
+</style>
