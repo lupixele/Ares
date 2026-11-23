@@ -131,10 +131,11 @@ clamped to a sane range, so two missed pings are tolerated before the driver act
   restore, and how a display is identified and proved to be the only one in use. No display
   configuration is read or written by these tests.
 
-Current totals: **864 native tests, 859 passed, 5 environmental skips, 0 failures** (2026-11-18). The
-skips are a disabled system tray build, an unlicensed virtual HID broker, two GPU encoders that this
-host does not have, and an external command test. The frontend suite is at **124 tests plus a
-production Vite build**, both verified on the same day.
+Current totals: **864 native tests, 859 passed, 5 environmental skips, 0 failures** (native suite
+re-run 2026-11-23 on the restamped build). The skips are a disabled system tray build, an unlicensed
+virtual HID broker, two GPU encoders that this host does not have, and an external command test. The
+frontend suite is at **131 tests plus a production Vite build**, including three that mount this
+feature's checkbox and assert it is offered on Windows only.
 
 ## Verified on real hardware
 
