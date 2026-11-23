@@ -1,6 +1,8 @@
 import { mount, shallowMount, flushPromises } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ref } from 'vue'
 
+import AudioVideo from '../../src_assets/common/assets/web/configs/tabs/AudioVideo.vue'
 import Config from '../../src_assets/common/assets/web/Config.vue'
 import DisplayDeviceOptions from '../../src_assets/common/assets/web/configs/tabs/audiovideo/DisplayDeviceOptions.vue'
 import General from '../../src_assets/common/assets/web/configs/tabs/General.vue'
@@ -215,6 +217,62 @@ describe('configuration page', () => {
     expect(wrapper.find('.ares-config__header').exists()).toBe(true)
     expect(wrapper.get('.ares-config__title').text()).toBe('config.configuration')
     expect(wrapper.get('.ares-config__desc').text()).toBe('config.configuration_desc')
+    wrapper.unmount()
+  })
+})
+
+describe('virtual display option', () => {
+  /**
+   * Mount the audio/video tab with only the pieces this option needs.
+   * @param {string} platform Host platform the tab is being rendered for.
+   * @param {string} virtualDisplay Configured value for the option.
+   * @returns {import('@vue/test-utils').VueWrapper} The mounted tab.
+   */
+  function mountAudioVideo(platform, virtualDisplay) {
+    return mount(AudioVideo, {
+      props: {
+        platform,
+        config: {
+          install_steam_audio_drivers: 'enabled',
+          stream_audio: 'enabled',
+          virtual_display: virtualDisplay,
+        },
+      },
+      global: {
+        provide: {
+          platform: ref(platform),
+          i18n: { t: key => key },
+        },
+        mocks: { $t: key => key },
+        stubs: {
+          AdapterNameSelector: true,
+          DisplayDeviceOptions: true,
+          DisplayModesSettings: true,
+          DisplayOutputSelector: true,
+        },
+      },
+    })
+  }
+
+  it('offers the option on Windows with a box that starts unchecked', () => {
+    const wrapper = mountAudioVideo('windows', 'disabled')
+
+    expect(wrapper.get('label[for="virtual_display"]').text()).toContain('config.virtual_display')
+    expect(wrapper.get('#virtual_display').element.checked).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows an enabled configuration as a checked box', () => {
+    const wrapper = mountAudioVideo('windows', 'enabled')
+
+    expect(wrapper.get('#virtual_display').element.checked).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('hides the option on hosts that cannot create a virtual display', () => {
+    const wrapper = mountAudioVideo('linux', 'disabled')
+
+    expect(wrapper.find('#virtual_display').exists()).toBe(false)
     wrapper.unmount()
   })
 })
